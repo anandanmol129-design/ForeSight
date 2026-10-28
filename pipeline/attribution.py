@@ -1,6 +1,8 @@
 """Which tenant drives the growth? Per-tenant slope over the rack forecast's fit window."""
 import numpy as np
+import pandas as pd
 
+import config
 from pipeline import forecast as fcmod
 
 
@@ -25,9 +27,17 @@ def attribute(rack_fc, tenant_series: dict, min_slope=0.0):
     return rows, top
 
 
+def _when(ts):
+    """A date, or "Day N HH:00" on an hourly record (1 model day = 1 real hour from epoch)."""
+    if config.RECORD["step"] != "hour":
+        return f"{ts:%d %b %Y}"
+    h = (ts - pd.Timestamp(config.RECORD["epoch"])) // pd.Timedelta(days=1)
+    return f"Day {h // 24 + 1} {h % 24:02d}:00"
+
+
 def driver_text(rack_fc, top):
     if rack_fc is None or top is None:
         return "no significant growth"
     cps = [c for c in rack_fc["change_points"] if c <= rack_fc["fit_start"]]
-    since = f" since {cps[-1]:%d %b %Y}" if cps and cps[-1] == rack_fc["fit_start"] else ""
+    since = f" since {_when(cps[-1])}" if cps and cps[-1] == rack_fc["fit_start"] else ""
     return f"{top['tenant']} ({top['share_pct']:.0f}% of growth{since})"

@@ -69,6 +69,33 @@ with the owner's own UI work (`app.py` styling, `ui_fx.py`, `ui_story.py`, `asse
   payload made the component's `JSON.parse` fail.
 - **Audit tab** shows `audit.log_path()`, relative to the repo when possible.
 
+### 5b. Presentation fixes (2026-10-29)
+- **Story component (`ui_story.py`):** the key includes a hash of the rack set, so switching
+  records rebuilds the 3D hall instead of reusing the old one. This fixes the `layoutMaps`
+  TypeError after a switch. `layoutMaps` also skips any card with no rack position. With many
+  racks (M100 has 49), the tenant maps fall back to a scrolling grid.
+- **Colours:** `RES_COLOR` covers `cpu_pct`, `mem_pct` and `disk_io_pct`. Before this,
+  every Alibaba line was white.
+- **Wording when the limit is already crossed:**
+  - `safe_in()` says "past safe limit".
+  - `safe_eta()` drops the P10–P90 range then, so text no longer reads "(now–now h)".
+  - `eta_u()` gives "now", not "now h" or "0.0 h", in the matrix cells, the Soonest ETA KPI
+    and the HUD.
+- **Hourly dates:**
+  - `pipeline/attribution.py` `driver_text` formats "since …" with `_when()`. On Alibaba it
+    showed "since 12 Jun 2000".
+  - The Validation episode and spike tables go through `real_cols()`, which gives
+    "Day N HH:00" and renames `*days*` columns to `*hours*`.
+  - The Audit table still shows raw model dates on purpose: it is the log as written.
+- **Records without an events log (M100, Alibaba):**
+  - Validation shows an info box instead of the "fix EXHAUSTION_EVENT_TYPES" warning.
+  - False alarms shows "—", because every closed episode would count as a false alarm.
+  - Forecast error shows the last-30-step MAPE.
+- **Tenant view:**
+  - The default workload is the one whose total grows fastest across all racks. Before, it
+    was the fastest per-rack grower, which picked M100's near-zero network.
+  - Forecasts, bands and "Projected" are clipped at 0, so usage is never drawn below zero.
+
 ### 6. Tools (`tools/`)
 - `m100_to_canonical.py`, `alibaba_to_canonical.py`: the converters above. They stream large
   inputs and write `record.json`.
@@ -106,6 +133,11 @@ Extra checks:
   `json.dumps(payload, allow_nan=False)` gives no exceptions for M100 (284 KB) or Alibaba
   (318 KB).
 
+UI pass (2026-10-29): headless Chromium driven over CDP against a scratch copy of the repo,
+so the real `audit/` is untouched. The pass covers all 3 records × 5 operator tabs, the story
+scroll and the tenant view. There were no JS exceptions, no console errors and no
+`stException`. All three self-checks still pass after the fixes.
+
 ## Incidents a reviewer should know about
 - **Audit pollution, fixed:**
   - An early test passed an empty scratch dir. It wasn't listed in `records()`, so the app
@@ -114,7 +146,9 @@ Extra checks:
   - The cause was fixed: the active record is always listed, and the app switches only on a
     real selection change.
   - Lines the owner's live app wrote between 14:07 and 14:08 UTC were lost with it.
-- **Live app:** the owner runs the app on :8502. New files in `audit/dc_m100/` and
+- **Live app:** the owner runs the app on :8502 (other sessions have used :8501/:8503). Any
+  of these writes to the real `audit/` whenever someone views it, e.g. the synthetic entry at
+  04:16 IST on 2026-10-29. New files in `audit/dc_m100/` and
   `audit/dc_alibaba/` come from that, not from the tests.
 
 ## Suggested review focus

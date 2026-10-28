@@ -5,10 +5,11 @@ about it**: hardware upgrades, optimisations, inefficiencies worth checking. For
 also shows the **2nd-order effects**, such as more power draw and heat, or another rack losing
 headroom.
 
-> **Status: hardcoded prototype.** Rack specs, actions and their deltas are written by hand for
-> the synthetic scenario (`pipeline/synthetic.py`). The *current* numbers come from the live
-> forecast. On any other record the feature hides itself (`recommend.available()`). The section
-> [Moving to real data](#moving-to-real-data) lists what has to change.
+> **Status:** the synthetic demo keeps its 8 hand-written actions. **Real records (M100,
+> Alibaba) now get generated actions**: rules over the live forecast, the rack-1 profile for
+> specs and upgrade sizes, and coefficients fitted from telemetry where the fit is good enough.
+> See [Real data: what is implemented](#real-data-what-is-implemented). The original plan is
+> kept below it under [Moving to real data](#moving-to-real-data).
 
 ## Where it shows up
 
@@ -69,7 +70,7 @@ For each rack × resource a change touches (`_row()`):
 | Value | Source |
 |---|---|
 | Now level, capacity, margin | Live forecast result (`fc["last_level"]`, `capacity`, `threshold`) |
-| Now weeks to safe limit | The engine's own P50 ETA (`eta["likely"] / 7`), so it matches the Overview |
+| Now weeks to safe limit | The engine's own P50 ETA (`eta["likely"] / unit_days`: weeks, or hours on an hourly record), so it matches the Overview |
 | After level | now + Σ`level` |
 | After capacity / safe limit | capacity + Σ`capacity`, with the same safety margin |
 | After weeks to safe limit | Linear what-if: (safe limit − level) / (slope + Σ`slope`). Shown as `>25` past the horizon. |
@@ -79,6 +80,40 @@ For each rack × resource a change touches (`_row()`):
 * `evaluate(results)` scores each action on its own.
 * `combined(results, ids)` sums the deltas of the chosen actions before scoring. That is how
   interactions show up: R1 + R7 together leave rack-3 tight on both network and power.
+
+## Real data: what is implemented
+
+| Doc step | Done in `pipeline/recommend.py` | Notes |
+|---|---|---|
+| 1. Rack specs | `spec_for(rack)` falls back to the rack-1 (Gen-2) profile; `spec_table()` shows it as one column, with the Power / Network / Cooling / Storage lines rewritten to this record's `limits.csv` values and rows for resources the record doesn't measure dropped | Upgrade sizes come from the profiles: ToR doubles network, a shelf adds min(250 TB, rack capacity), GPU node 2.5 kW, host RAM 512 → 768 GB (the Gen-3 size) |
+| 2. Coefficients | `fit(rack_series)`: per-rack straight line, median slope and R² over racks; used only when median R² ≥ 0.3 (`MIN_R2`) | Logged once per data hash as `run_type: coefficient_fit` in the record's audit log. **M100:** C_PER_KW fit 0.163 °C/kW but R² 0.057 → keeps 0.15 (inlet temperature follows the room, not the rack). KW_PER_VM: no record has `vm_count` → 0.03. |
+| 3. Rules | `generate(results, coefs, step_days)` runs `RULES` and numbers the output R1… most urgent first | Same record shape as the hand-written list, so `evaluate`, `combined` and `touching` (now taking the list) and the whole UI are unchanged |
+| 4.1 Switch on | `available(recs)` is true when the list is non-empty; `uncovered()` lists alerting pairs no action touches, shown in the tab caption | Operator only, as before (`plan_recs()` in `app.py` is called from the operator branch) |
+| 4.3 Backtest hit rate | **Not done yet** | |
+| 4.5 Hourly records | Weeks to safe limit are reported in the record's display unit (`unit_days`): hours on Alibaba; ToR lead time is compared in real days (`step_days`) | |
+
+### Rules
+
+Each rule caps itself at `MAX_RACKS` (4) racks, tightest first, and says how many more have the
+same alert. Deltas that are not measured are labelled *assumption* or *guess* in the row note.
+
+| Rule | When | Emits |
+|---|---|---|
+| `_rule_cooling` (new) | `temp_c` alert | **Check for inefficiency:** cooling/airflow check on every hot rack (drift stops, an assumption), naming racks where power is flat. **Upgrade:** rear-door heat exchangers on the 4 most urgent (−2 °C assumption, +0.4 kW fans). **Optimise:** move 25 % of the load from the hottest racks to the coolest, so the gain is only `C_PER_KW` × kW |
+| `_rule_memory` (new) | `mem_pct` alert | **Upgrade:** host RAM 512 → 768 GB on the 4 tightest (use −⅓). **Check for inefficiency:** memory full while CPU < 50 % → right-size memory requests (−5 points, a guess) |
+| `_rule_tor` | Network CRITICAL/WARNING with ETA < 35 days + 2 weeks | R2-type ToR upgrade |
+| `_rule_storage` | Storage alert | R3-type shelf and R4-type compression + lifecycle |
+| `_rule_licences` | Licence alert, other pools < 70 % used | R5-type seat reassignment |
+| `_rule_rebalance` | Any other tenant-split resource alerting with positive slope | R1-type: move half of the top tenant (≥ 50 % share), else steer half of the new growth, to an OK rack with ≥ 5 % headroom, OK inlet temperature and no CRITICAL/WARNING on any resource (new load needs memory and power too) |
+| `_rule_stranded_power` | Every rack under 70 % of its power budget | R7-type: GPU nodes on the rack with the most thermal headroom |
+| `_rule_creep` | Rack total grows ≥ 2 % of capacity per quarter, no tenant does | R8-type orphan check |
+
+### What it produces today
+
+| Record | Actions |
+|---|---|
+| **M100** (9 `temp_c` alerts) | R1 rear-door heat exchangers on rack-02/00/11/13 · R2 shift load to the coolest racks (≈0.6 °C gain, shown as weak) · R3 cooling check on all 9 · R4 stranded power (31 % of budget used) → GPU nodes on rack-31. No alert is left uncovered. |
+| **Alibaba** (`mem_pct` CRITICAL on all 50 racks) | R1 RAM upgrade on the 4 fullest racks · R2 memory-full/CPU-idle check on all 50. Priorities read *Now*, because the whole hourly horizon is days away. With every rack over 90 % memory, no rack can take moved load. So the 3 CPU PLAN racks stay uncovered (the caption says so), and the combined plan leaves 46 racks tight. |
 
 ## Moving to real data
 
