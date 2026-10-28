@@ -1,5 +1,5 @@
-pandas
-numpy
-ruptures
-streamlit
-plotly
+pandas>=3.0
+numpy>=2.0
+ruptures>=1.1.9
+streamlit>=1.66
+plotly>=6.0
