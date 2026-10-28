@@ -213,3 +213,12 @@ button[kind="secondary"]:hover { border-color: var(--cy) !important;
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
 @media (max-width: 900px) { .readout { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* Recommendation "Apply" pills: make the on/off state obvious */
+[class*="st-key-ov_plan_"] button[data-variant="pills"],
+.st-key-rec_plan button[data-variant="pills"] { opacity: .55; }
+[class*="st-key-ov_plan_"] button[data-variant="pills"][data-selected="true"],
+.st-key-rec_plan button[data-variant="pills"][data-selected="true"] {
+  opacity: 1; background: var(--strong, #f5f5f5); border-color: var(--strong, #f5f5f5); }
+[class*="st-key-ov_plan_"] button[data-variant="pills"][data-selected="true"] p,
+.st-key-rec_plan button[data-variant="pills"][data-selected="true"] p { color: #050505; }

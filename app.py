@@ -1,6 +1,7 @@
 """Capacity early-warning dashboard (AO-02). Read-only: never changes facility controls."""
 from html import escape
 
+import math
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -9,7 +10,7 @@ import streamlit as st
 import config
 import ui_fx
 import ui_story
-from pipeline import audit, backtest, clean, engine, loader
+from pipeline import audit, backtest, clean, engine, loader, recommend
 from pipeline.exhaustion import first_crossing
 from pipeline.forecast import smooth
 
@@ -240,6 +241,17 @@ def kpi(label_, value, tone="neutral", **kw):
         st.metric(label_, value, **kw)
 
 
+def num(v, signed=False):
+    """Readable at any scale: 1234 / 12.3 / 0.0123 (3 significant figures below 10)."""
+    sign = "+" if signed else ""
+    if v == 0 or abs(v) >= 100:
+        return f"{v:{sign},.0f}"
+    if abs(v) >= 10:
+        return f"{v:{sign}.1f}"
+    d = min(8, 2 - math.floor(math.log10(abs(v))))        # 3 significant figures, never 1e-05
+    return f"{v:{sign}.{d}f}".rstrip("0").rstrip(".")
+
+
 def sev_badge(status):
     return f":{SEV_BADGE[status]}-badge[{SEV_ICON[status]} {status}]"
 
@@ -445,6 +457,128 @@ def explanation(r):
     return f"{head}{why}{note}\n\n**Recommended:** {r['recommendation']}"
 
 
+VERDICT = {"ok": ("OK", "OK"), "tight": ("Tight", "WARNING"), "over": ("Over safe limit", "CRITICAL")}
+
+
+def weeks_to(w):
+    return "now" if w == 0 else f">{config.HORIZON_DAYS // 7}" if w is None else f"{w}"
+
+
+def res_name(res):
+    return {"vm_count": "VMs", "licences": "licence seats", "temp_c": "temperature"}.get(
+        res, res.split("_")[0])
+
+
+def side_text(x):
+    """'rack-3 network +21 Gbps -> safe limit in 15.3 wks' (coloured when it gets tight)."""
+    parts = []
+    if abs(x["after"] - x["before"]) >= 0.05:
+        parts.append(f"{num(x['after'] - x['before'], signed=True)} {x['unit']}")
+    if x["capacity_after"] != x["capacity_before"]:
+        parts.append(f"capacity {num(x['capacity_after'] - x['capacity_before'], signed=True)} {x['unit']}")
+    if x["peak"] != x["after"]:
+        parts.append(f"{num(x['peak'] - x['after'], signed=True)} {x['unit']} while the work runs")
+    end = ("over the safe limit" if x["verdict"] == "over" else
+           f"safe limit in {weeks_to(x['weeks_after'])} wks" if x["weeks_after"] is not None
+           else "stays clear")
+    color = {"ok": "green", "tight": "orange", "over": "red"}[x["verdict"]]
+    return (f"{x['rack']} {res_name(x['resource'])} **{', '.join(parts) or 'no change'}** "
+            f"→ :{color}[{end}] ({', '.join(x['recs'])})")
+
+
+def effect_chart(rows):
+    """One-glance before/after: each row's level as % of its safe limit, grey dot = now,
+    arrow to the coloured dot = after (green OK, amber tight, red over). Bold = intended."""
+    rows = sorted(rows, key=lambda x: x.get("order", 1))
+    names = [(f"<b>{x['rack']} {res_name(x['resource'])}</b>" if x.get("order", 1) == 1
+              else f"{x['rack']} {res_name(x['resource'])}") for x in rows]
+    before = [100 * x["before"] / x["safe_before"] for x in rows]
+    after = [100 * x["after"] / x["safe_after"] for x in rows]
+    peak = [100 * x["peak"] / x["safe_after"] for x in rows]
+    color = [SEV_SOLID[VERDICT[x["verdict"]][1]] for x in rows]
+    fig = go.Figure()
+    fig.add_vrect(x0=100, x1=200, fillcolor="rgba(244, 63, 94, 0.07)", line_width=0, layer="below")
+    fig.add_vline(x=100, line=dict(color=ATTN_YELLOW, dash="dash", width=1.5),
+                  annotation_text="safe limit", annotation_font_color=ATTN_YELLOW,
+                  annotation_position="top")
+    for n, b, a, c in zip(names, before, after, color):
+        if abs(a - b) > 0.3:
+            fig.add_annotation(x=a, y=n, ax=b, ay=n, xref="x", yref="y", axref="x", ayref="y",
+                               showarrow=True, arrowhead=2, arrowsize=1.2, arrowwidth=2,
+                               arrowcolor=c, standoff=6, text="")
+    fig.add_trace(go.Scatter(x=before, y=names, mode="markers", name="now",
+                             marker=dict(color=UI["faint"], size=11),
+                             hovertemplate="now %{x:.0f}% of safe limit<extra></extra>"))
+    for n, x in zip(names, rows):                 # fixed right-hand column, clear of the arrows
+        fig.add_annotation(x=1.01, xref="paper", y=n, yref="y", xanchor="left", showarrow=False,
+                           text=f"{weeks_to(x['weeks_before'])} → {weeks_to(x['weeks_after'])} wks",
+                           font=dict(color=UI["muted"], size=11, family=UI["mono"]))
+    fig.add_trace(go.Scatter(
+        x=after, y=names, mode="markers", name="after", marker=dict(color=color, size=13),
+        customdata=[f"{num(x['before'])} → {num(x['after'])} {x['unit']} · safe limit "
+                    f"{num(x['safe_after'])}" for x in rows],
+        hovertemplate="after %{x:.0f}% of safe limit<br>%{customdata}<extra></extra>"))
+    tmp = [(n, p_) for n, p_, x in zip(names, peak, rows) if x["peak"] != x["after"]]
+    if tmp:
+        fig.add_trace(go.Scatter(x=[t[1] for t in tmp], y=[t[0] for t in tmp], mode="markers",
+                                 name="peak while working",
+                                 marker=dict(color="rgba(0,0,0,0)", size=12, symbol="circle",
+                                             line=dict(color=ATTN_YELLOW, width=2)),
+                                 hovertemplate="peak %{x:.0f}% during the work<extra></extra>"))
+    lo, hi = min(before + after + peak), max(before + after + peak + [100])
+    styled(fig, height=70 + 34 * len(rows))
+    fig.update_layout(legend=dict(orientation="h", y=1.02, x=0, xanchor="left", yanchor="bottom"),
+                      margin=dict(t=40, b=10, l=10, r=10))
+    fig.update_layout(margin=dict(t=40, b=10, l=10, r=120))
+    fig.update_xaxes(title="% of safe limit used", range=[max(0, lo - 10), hi + 8], ticksuffix="%")
+    fig.add_annotation(x=1.01, xref="paper", y=1.02, yref="paper", xanchor="left", yanchor="bottom",
+                       showarrow=False, text="wks to safe limit", font=dict(color=UI["faint"], size=10))
+    fig.update_yaxes(autorange="reversed", categoryorder="array", categoryarray=names)
+    return fig
+
+
+def plan_bars(rows, first):
+    """At a glance: one horizontal bar per affected rack x resource, % of its safe limit.
+    Grey = now, coloured by resource = after the plan; the weeks label carries the verdict."""
+    rows = sorted(rows, key=lambda x: ((x["rack"], x["resource"]) not in first, x["rack"], x["resource"]))
+    names = [(f"<b>{x['rack']} {res_name(x['resource'])}</b>" if (x["rack"], x["resource"]) in first
+              else f"{x['rack']} {res_name(x['resource'])}") for x in rows]
+    before = [100 * x["before"] / x["safe_before"] for x in rows]
+    after = [100 * x["after"] / x["safe_after"] for x in rows]
+    color = [RES_COLOR.get(x["resource"], UI["text"]) for x in rows]
+    fig = go.Figure()
+    fig.add_vrect(x0=100, x1=200, fillcolor="rgba(244, 63, 94, 0.08)", line_width=0, layer="below")
+    fig.add_trace(go.Bar(y=names, x=before, orientation="h", name="now", width=0.8,
+                         marker=dict(color="rgba(163, 163, 163, 0.22)", cornerradius=3),
+                         hovertemplate="now %{x:.0f}% of safe limit<extra></extra>"))
+    fig.add_trace(go.Bar(
+        y=names, x=after, orientation="h", showlegend=False, width=0.42,
+        marker=dict(color=color, cornerradius=3),
+        text=[f"{num(x['after'])} {x['unit']}" for x in rows], textposition="outside",
+        textfont=dict(color=UI["text"], size=11), cliponaxis=False,
+        customdata=[f"{num(x['before'])} → {num(x['after'])} {x['unit']} · safe limit "
+                    f"{num(x['safe_after'])}" for x in rows],
+        hovertemplate="after %{x:.0f}% of safe limit<br>%{customdata}<extra></extra>"))
+    for res in dict.fromkeys(x["resource"] for x in rows):          # colour key = resource
+        fig.add_trace(go.Bar(y=[None], x=[None], name=res_name(res),
+                             marker_color=RES_COLOR.get(res, UI["text"])))
+    fig.add_vline(x=100, line=dict(color=ATTN_YELLOW, dash="dash", width=1.5),
+                  annotation_text="safe limit", annotation_font_color=ATTN_YELLOW,
+                  annotation_position="top")
+    for n, x in zip(names, rows):
+        fig.add_annotation(x=1.01, xref="paper", y=n, yref="y", xanchor="left", showarrow=False,
+                           text=f"● {weeks_to(x['weeks_before'])} → {weeks_to(x['weeks_after'])} wks",
+                           font=dict(color=SEV_SOLID[VERDICT[x["verdict"]][1]], size=11,
+                                     family=UI["mono"]))
+    styled(fig, height=90 + 36 * len(rows))
+    fig.update_layout(barmode="overlay", bargap=0.25, margin=dict(t=40, b=10, l=10, r=135),
+                      legend=dict(orientation="h", y=1.02, x=0, xanchor="left", yanchor="bottom"))
+    fig.update_xaxes(title="% of safe limit used", ticksuffix="%",
+                     range=[0, max(after + before + [100]) + 18])
+    fig.update_yaxes(autorange="reversed")
+    return fig
+
+
 # ---------------------------------------------------------------- page
 tel, lim, ev, source, h = load(str(config.DATA_DIR))
 tenants = sorted(tel["tenant"].dropna().unique())
@@ -579,51 +713,105 @@ else:
             ui_fx.server_hall([{"name": "", "status": "NONE"}] * 4, live=False)
 
 if viewer == "Operator":
-    tab1, tab2, tab3, tab4 = st.tabs([":material/dashboard: Overview",
+    # KPI row and the main chart sit above the tabs, so every tab opens right under it
+    new_tab()
+    rows = sorted(results, key=lambda r: (SEV_ORDER[r["status"]],
+                                          r["eta"]["likely"] if r["eta"]["likely"] is not None else 9e9))
+    statuses = [r["status"] for r in rows]
+    alerts_ = [r for r in rows if r["status"] in ALERTING]
+    nearest = next((r for r in rows if r["eta"]["likely"] is not None), None)
+    rack_series, _ = series_for("Operator", h)
+    racks = sorted({r["rack"] for r in rows})
+    worst_rack = rows[0]["rack"]
+
+    with st.container(horizontal=True):
+        for s_ in ["CRITICAL", "WARNING", "PLAN", "HOLD"]:
+            kpi(f":{SEV_BADGE[s_]}[{SEV_ICON[s_]}] {s_}", statuses.count(s_), s_,
+                help=status_help(s_, rows))
+        kpi(":primary[:material/sensors:] Monitored", len(rows))
+        kpi(":primary[:material/timer:] Soonest ETA",
+            f"{dur(nearest['eta']['likely'])} {U}" if nearest else "—",
+            help=f"{nearest['rack']} · {nearest['resource']}" if nearest else None)
+
+    # ---- hero: every resource on one rack, % of capacity, actual vs forecast
+    with panel("Capacity outlook", ":material/timeline:",
+               "Every resource on one rack as % of capacity — actual (solid) and P50 "
+               "forecast (dashed)"):
+        if st.session_state.get("hero_rack") not in racks:
+            st.session_state["hero_rack"] = worst_rack
+        rack = st.segmented_control("Rack", racks, key="hero_rack",
+                                    label_visibility="collapsed") or worst_rack
+        mine = [r for r in rows if r["rack"] == rack and r["fc"]]
+        items = [{"name": r["resource"], "raw": rack_series[(rack, r["resource"])],
+                  "fc": r["fc"], "color": RES_COLOR.get(r["resource"], UI["text"]),
+                  "scale": 100 / r["capacity"]} for r in sorted(mine, key=lambda r: r["resource"])]
+        attn = [(r, 100 / r["capacity"], r["resource"]) for r in mine if r["status"] in ALERTING]
+        plot(trend_chart(items, "% of capacity", cutoff, attn,
+                         refs=[(100, "capacity", UI["faint"])], height=460))
+        st.caption("Yellow line: forecast reaches the safe limit (capacity − safety margin). "
+                   "Red line: forecast reaches full capacity. Drawn only for sustained alerts.")
+        for r in sorted((r for r in mine if r["status"] != "OK"),
+                        key=lambda r: SEV_ORDER[r["status"]]):
+            st.markdown(alert_line(r))
+
+    tab1, tab2, tab_rec, tab3, tab4 = st.tabs([":material/dashboard: Overview",
                                       ":material/query_stats: Resource detail",
+                                      ":material/build: Recommendations",
                                       ":material/fact_check: Validation",
                                       ":material/history: Audit log"])
 
     with tab1:
-        new_tab()
-        rows = sorted(results, key=lambda r: (SEV_ORDER[r["status"]],
-                                              r["eta"]["likely"] if r["eta"]["likely"] is not None else 9e9))
-        statuses = [r["status"] for r in rows]
-        alerts_ = [r for r in rows if r["status"] in ALERTING]
-        nearest = next((r for r in rows if r["eta"]["likely"] is not None), None)
-        rack_series, _ = series_for("Operator", h)
-        racks = sorted({r["rack"] for r in rows})
-        worst_rack = rows[0]["rack"]
-
-        with st.container(horizontal=True):
-            for s_ in ["CRITICAL", "WARNING", "PLAN", "HOLD"]:
-                kpi(f":{SEV_BADGE[s_]}[{SEV_ICON[s_]}] {s_}", statuses.count(s_), s_,
-                    help=status_help(s_, rows))
-            kpi(":primary[:material/sensors:] Monitored", len(rows))
-            kpi(":primary[:material/timer:] Soonest ETA",
-                f"{dur(nearest['eta']['likely'])} {U}" if nearest else "—",
-                help=f"{nearest['rack']} · {nearest['resource']}" if nearest else None)
-
-        # ---- hero: every resource on one rack, % of capacity, actual vs forecast
-        with panel("Capacity outlook", ":material/timeline:",
-                   "Every resource on one rack as % of capacity — actual (solid) and P50 "
-                   "forecast (dashed)"):
-            if st.session_state.get("hero_rack") not in racks:
-                st.session_state["hero_rack"] = worst_rack
-            rack = st.segmented_control("Rack", racks, key="hero_rack",
-                                        label_visibility="collapsed") or worst_rack
-            mine = [r for r in rows if r["rack"] == rack and r["fc"]]
-            items = [{"name": r["resource"], "raw": rack_series[(rack, r["resource"])],
-                      "fc": r["fc"], "color": RES_COLOR.get(r["resource"], UI["text"]),
-                      "scale": 100 / r["capacity"]} for r in sorted(mine, key=lambda r: r["resource"])]
-            attn = [(r, 100 / r["capacity"], r["resource"]) for r in mine if r["status"] in ALERTING]
-            plot(trend_chart(items, "% of capacity", cutoff, attn,
-                             refs=[(100, "capacity", UI["faint"])], height=460))
-            st.caption("Yellow line: forecast reaches the safe limit (capacity − safety margin). "
-                       "Red line: forecast reaches full capacity. Drawn only for sustained alerts.")
-            for r in sorted((r for r in mine if r["status"] != "OK"),
-                            key=lambda r: SEV_ORDER[r["status"]]):
-                st.markdown(alert_line(r))
+        # continues the section numbering from the chart above
+        # ---- what to do about it: this rack's plan, and the same chart with it applied
+        if recommend.available(source):
+            by_id = {x["id"]: x for x in recommend.evaluate(results)}
+            with panel(f"Recommended plan · {rack}", ":material/build:",
+                       "What to do, and how close each affected resource gets to its safe limit"):
+                plan_l, plan_r = st.columns([2, 3], gap="large")
+                with plan_l:
+                    ids_all = recommend.touching(rack)
+                    with st.container(horizontal=True, vertical_alignment="bottom"):
+                        multi = st.session_state.get("plan_multi", False)
+                        # one key per mode: single holds a str, multi a list
+                        picked_ = st.pills("Apply", ids_all, selection_mode="multi" if multi else "single",
+                                           default=ids_all if multi else ids_all[0],
+                                           key=f"ov_plan_{rack}_{'multi' if multi else 'one'}",
+                                           help="Pick actions to see the bars and side effects change")
+                        st.toggle("Combine", key="plan_multi",
+                                  help="On: apply several actions at once. Off: one at a time.")
+                    ids = picked_ if multi else [picked_] if picked_ else []
+                    for g in recommend.GROUPS:
+                        if picked := [by_id[i] for i in ids if by_id[i]["group"] == g]:
+                            st.markdown(f"**{g}**\n" + "\n".join(
+                                f"- **{x['id']}** {x['short']}" for x in picked))
+                    side_keys = {(c["rack"], c["resource"]) for i in ids
+                                 for c in by_id[i]["rows"] if c["order"] == 2}
+                    side = [x for x in recommend.combined(results, ids)
+                            if (x["rack"], x["resource"]) in side_keys]
+                    # show what matters: power always, plus anything that gets closer to a limit
+                    big = [x for x in side if x["resource"] == "power_kw" or x["verdict"] != "ok"
+                           or x["weeks_after"] is not None
+                           or abs(x["after"] / x["safe_after"] - x["before"] / x["safe_before"]) >= 0.05]
+                    heat = [x for x in side if x["resource"] == "temp_c"]
+                    if big or heat:
+                        lines = [f"- {side_text(x)}" for x in big]
+                        if heat:
+                            worst = max(heat, key=lambda x: abs(x["after"] - x["before"]))
+                            lines.append(f"- Heat follows power: at most **{num(worst['after'] - worst['before'], signed=True)} °C** "
+                                         f"on {worst['rack']} → {num(worst['after'])} °C, safe limit {num(worst['safe_after'])} °C")
+                        st.markdown("**2nd-order effects**\n" + "\n".join(lines))
+                    if not ids:
+                        st.caption("Pick at least one action.")
+                with plan_r:
+                    first = {(c["rack"], c["resource"]) for i in ids
+                             for c in by_id[i]["rows"] if c["order"] == 1}
+                    plan_rows = recommend.combined(results, ids)
+                    if plan_rows:
+                        plot(plan_bars(plan_rows, first))
+                        st.caption("Grey = now, coloured bar = after the plan, as % of each "
+                                   "resource's safe limit. Bold = what the actions target, plain = "
+                                   "side effects. Right: weeks to safe limit, now → after "
+                                   "(green OK, amber tight, red over).")
 
         # ---- same philosophy per tenant, per workload
         with panel("Tenant demand by workload", ":material/groups:",
@@ -762,6 +950,123 @@ if viewer == "Operator":
             else:
                 st.caption(r["driver"])
 
+    with tab_rec:
+        new_tab()
+        if not recommend.available(source):
+            st.info("Recommendations are hand-written for the synthetic scenario for now; "
+                    "they will be derived from this record's data later.",
+                    icon=":material/construction:", title="Not available for this record")
+        else:
+            recs = recommend.evaluate(results)
+            plan_all = recommend.combined(results, [x["id"] for x in recs])
+            weeks = weeks_to
+
+            def effect_table(rows, plan=False):
+                df = pd.DataFrame([{
+                    **({"From": ", ".join(x["recs"])} if plan else
+                       {"Effect": "1st order" if x["order"] == 1 else "2nd order"}),
+                    "Rack": x["rack"], "Resource": x["resource"],
+                    "Now": f"{num(x['before'])} {x['unit']}",
+                    "After": f"{num(x['after'])} {x['unit']}"
+                             + (f" (peak {num(x['peak'])} while working)"
+                                if x["peak"] != x["after"] else ""),
+                    "Safe limit": (f"{num(x['safe_before'])} → {num(x['safe_after'])}"
+                                   if x["safe_before"] != x["safe_after"] else num(x["safe_before"])),
+                    "Wks to safe limit": f"{weeks(x['weeks_before'])} → {weeks(x['weeks_after'])}",
+                    "Verdict": VERDICT[x["verdict"]][0],
+                    **({} if plan else {"Note": x["note"]})} for x in rows])
+                sev = {v[0]: SEV_SOLID[v[1]] for v in VERDICT.values()}
+                st.dataframe(df.style.map(lambda v: f"color: {sev[v]}; font-weight: 700",
+                                          subset=["Verdict"]),
+                             hide_index=True, row_height=34, height=34 * (len(df) + 1) + 3)
+
+            kinds = [x["kind"] for x in recs]
+            net_kw = sum(x["after"] - x["before"] for x in plan_all if x["resource"] == "power_kw")
+            tight = [x for x in plan_all if x["verdict"] != "ok"]
+            with st.container(horizontal=True):
+                kpi(":primary[:material/build:] Recommendations", len(recs))
+                kpi(":primary[:material/memory:] Hardware upgrades", kinds.count("Hardware upgrade"))
+                kpi(":primary[:material/search_insights:] Inefficiencies", kinds.count("Inefficiency"))
+                kpi(":primary[:material/bolt:] Net power, full plan", f"{num(net_kw, signed=True)} kW",
+                    help="Steady-state change in rack power draw if every recommendation is applied")
+                kpi(":orange[:material/warning:] Tight, full plan", len(tight), "WARNING" if tight else "neutral",
+                    help="Rack × resource rows that end up close to or over their safe limit, "
+                         f"or within {config.WARNING_WEEKS} wks of it")
+            st.caption(":material/info: Hardcoded for the synthetic scenario. *Now* values and "
+                       "weeks-to-safe-limit come from the live forecast; the action deltas are "
+                       "hand-written. Heat follows power at "
+                       f"{recommend.C_PER_KW} °C/kW.")
+
+            with panel("Rack specs", ":material/dns:", "Current hardware per rack"):
+                st.dataframe(pd.DataFrame(recommend.RACK_SPECS), row_height=34,
+                             height=34 * (len(next(iter(recommend.RACK_SPECS.values()))) + 1) + 3)
+
+            with panel("What to do", ":material/lightbulb:",
+                       "Grey dot = now, arrow to coloured dot = after the action, as % of the "
+                       "safe limit. Bold = intended effect, plain = side effect. Right: weeks to "
+                       "safe limit, now → after"):
+                pick = st.segmented_control("Kind", ["All", *dict.fromkeys(kinds)], default="All",
+                                            key="rec_kind", label_visibility="collapsed") or "All"
+                for rec in recs:
+                    if pick not in ("All", rec["kind"]):
+                        continue
+                    with st.container(border=True):
+                        trig = (f" · {sev_badge(rec['trigger_status'])} "
+                                f"{rec['trigger'][0]} · {rec['trigger'][1]}"
+                                if rec["trigger_status"] else "")
+                        st.markdown(f"**{rec['id']} · {rec['title']}**  \n"
+                                    f":gray-badge[{rec['kind']}] :blue-badge[:material/schedule: "
+                                    f"{rec['priority']}]{trig}")
+                        st.markdown(rec["why"])
+                        st.caption(f":material/payments: {rec['cost']} · "
+                                   f":material/local_shipping: lead time {rec['lead']}")
+                        plot(effect_chart(rec["rows"]))
+                        with st.expander("Details", icon=":material/table_chart:"):
+                            effect_table(rec["rows"])
+                        st.markdown("**Other 2nd-order effects**\n" +
+                                    "\n".join(f"- {t}" for t in rec["risks"]))
+
+            with panel("Combined plan", ":material/merge:",
+                       "Recommendations interact - check the steady state with all chosen ones applied"):
+                ids = st.pills("Apply", [x["id"] for x in recs], selection_mode="multi",
+                               default=[x["id"] for x in recs], key="rec_plan",
+                               format_func=lambda i: f"{i} · {next(x['kind'] for x in recs if x['id'] == i)}")
+                plan = recommend.combined(results, ids)
+                by_res = {(x["rack"], x["resource"]): x for x in plan}
+                racks_ = sorted({r["rack"] for r in results})
+                now_kw = {r["rack"]: r["fc"]["last_level"] for r in results
+                          if r["resource"] == "power_kw" and r["fc"]}
+                after_kw = {k: by_res[(k, "power_kw")]["after"] if (k, "power_kw") in by_res else v
+                            for k, v in now_kw.items()}
+                safe_kw = next(r["threshold"] for r in results if r["resource"] == "power_kw")
+                fig = go.Figure([
+                    go.Bar(name="Now", x=racks_, y=[now_kw[k] for k in racks_],
+                           marker_color=UI["faint"], marker_cornerradius=4),
+                    go.Bar(name="After plan", x=racks_, y=[after_kw[k] for k in racks_],
+                           marker_color=RES_COLOR["power_kw"], marker_cornerradius=4,
+                           text=[f"{num(after_kw[k])} kW<br>{num(after_kw[k] - now_kw[k], signed=True)}"
+                                 for k in racks_], textposition="outside",
+                           textfont=dict(color=UI["text"]))])
+                fig.add_hline(y=safe_kw, line=dict(color=ATTN_YELLOW, dash="dash", width=1.5),
+                              annotation_text="safe limit", annotation_font_color=ATTN_YELLOW)
+                st.markdown("**Rack power draw** (2nd-order effect of the plan)")
+                plot(styled(fig, height=300).update_layout(barmode="group")
+                     .update_yaxes(title="kW", range=[0, safe_kw * 1.25]))
+                for x in plan:
+                    if x["verdict"] != "ok":
+                        st.warning(f"**{x['rack']} · {x['resource']}** ends at {num(x['after'])} "
+                                   f"{x['unit']} against a safe limit of {num(x['safe_after'])} "
+                                   + (f"({weeks(x['weeks_after'])} wks left)"
+                                      if x["weeks_after"] is not None else
+                                      f"(only {num(x['safe_after'] - x['after'])} {x['unit']} spare)")
+                                   + " after "
+                                   f"{', '.join(x['recs'])}.", icon=":material/warning:")
+                if plan:
+                    st.markdown("**Every resource the plan touches** (% of its safe limit, now → after)")
+                    plot(effect_chart(plan))
+                    with st.expander("Details", icon=":material/table_chart:"):
+                        effect_table(plan, plan=True)
+
     with tab3:
         new_tab()
         if not ev.event_type.isin({t.lower() for t in config.EXHAUSTION_EVENT_TYPES}).any():
@@ -825,20 +1130,22 @@ else:
     tab1, tab2 = st.tabs([":material/dashboard: My trends", ":material/query_stats: Detail"])
     with tab1:
         new_tab()
-        cards = [r for r in results if r["fc"]]
+        own = series_for(viewer, h)[1]
+        mine = {WL: res for WL, res in WORKLOADS.items() if any(r["resource"] == res for r in results)}
+        # one workload at a time: one card per rack, the same series the chart below draws
+        wl = st.segmented_control("Workload", list(mine), default=next(iter(mine)),
+                                  key="t_wl") or next(iter(mine))
+        res = mine[wl]
+        unit = config.UNITS.get(res, "")
+        cards = sorted((r for r in results if r["fc"] and r["resource"] == res), key=lambda r: r["rack"])
         for i in range(0, len(cards), 4):
             for col, r in zip(st.columns(4), cards[i:i + 4]):
                 with col:
-                    kpi(f"{r['rack']} · {r['resource']}", f"{r['fc']['last_level']:.1f}",
-                        delta=round(UNIT_DAYS * r["fc"]["slope"], 2) + 0.0,
+                    kpi(f"{r['rack']} · {wl}", f"{num(r['fc']['last_level'])} {unit}".strip(),
+                        delta=f"{num(UNIT_DAYS * r['fc']['slope'], signed=True)}",
                         delta_description=f"per {U_LONG[:-1]}")
-        own = series_for(viewer, h)[1]
-        mine = {WL: res for WL, res in WORKLOADS.items() if any(r["resource"] == res for r in results)}
         with panel("My demand by workload", ":material/timeline:",
                    "Actual (solid) and forecast (dashed)"):
-            wl = st.segmented_control("Workload", list(mine), default=next(iter(mine)),
-                                      key="t_wl") or next(iter(mine))
-            res = mine[wl]
             items = [{"name": r["rack"], "raw": own[(r["rack"], res, viewer)], "fc": r["fc"],
                       "color": TENANT_COLOR_LIST[i % len(TENANT_COLOR_LIST)]}
                      for i, r in enumerate(sorted((r for r in results if r["resource"] == res),
@@ -847,9 +1154,9 @@ else:
         with panel("My usage", ":material/table_chart:"):
             st.dataframe(pd.DataFrame([{
                 "Rack": r["rack"], "Resource": r["resource"],
-                "Current": round(r["fc"]["last_level"], 1) if r["fc"] else None,
-                f"Trend per {U_LONG[:-1]}": round(UNIT_DAYS * r["fc"]["slope"], 2) if r["fc"] else None,
-                f"Projected in {84 // UNIT_DAYS} {U}": round(r["fc"]["p50"][83], 1) if r["fc"] else None}
+                "Current": float(num(r["fc"]["last_level"]).replace(",", "")) if r["fc"] else None,
+                f"Trend per {U_LONG[:-1]}": float(num(UNIT_DAYS * r["fc"]["slope"]).replace(",", "")) if r["fc"] else None,
+                f"Projected in {84 // UNIT_DAYS} {U}": float(num(r["fc"]["p50"][83]).replace(",", "")) if r["fc"] else None}
                 for r in results]), hide_index=True)
     with tab2:
         new_tab()

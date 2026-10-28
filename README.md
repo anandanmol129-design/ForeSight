@@ -31,6 +31,7 @@ replays every day of history, which takes about 45 s.
 | 7 | `backtest.py` | Replays the pipeline **every day**, using only data up to that day. Reports lead time, false alarms, spikes that alerted, and MAPE. |
 | 8 | `audit.py` | Writes `audit/forecast_log.jsonl` (live runs) and `audit/backtest_log.jsonl` (replays). |
 | – | `engine.py` | The single entry point. The app and the backtest both call it, so the Validation tab measures exactly what operators see. |
+| 9 | `recommend.py` | **Hardcoded for the synthetic scenario.** Rack specs plus 8 actions (hardware upgrades, inefficiencies, rebalancing), each with 1st- and 2nd-order effects (power → heat, other racks' headroom). *Now* levels and ETAs come from the live forecast; hidden on real records. |
 
 ## Dashboard
 
@@ -40,6 +41,7 @@ replays every day of history, which takes about 45 s.
   the ETA and confidence.
 * **Tenant demand by workload**: same chart style for Compute / Storage / Network / Licences on a rack, one
   line per tenant plus the rack total (operator only).
+* **Recommendations**: rack specs, each recommended action with its side effects, and a combined plan (pick actions, see rack power draw and anything left tight). Synthetic data only for now. Details and the plan for real data: [`RECOMMENDATIONS.md`](RECOMMENDATIONS.md).
 * Tenants see the same chart for their own workloads only, with no capacity or other tenants.
 
 ## Results on the synthetic data (`selfcheck.py`)
