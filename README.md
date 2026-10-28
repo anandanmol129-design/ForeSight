@@ -26,10 +26,21 @@ replays every day of history, which takes about 45 s.
 | 3 | `forecast.py` | Fits a linear trend to the 7-day rolling median after the last change point. P10/P50/P90 bands = ±1.28·σ·√h. Horizon is 180 days. |
 | 4 | `exhaustion.py` | Finds when each band first crosses capacity − safety margin: earliest = P90, likely = P50, latest = P10. |
 | 5 | `alerts.py` | An alert needs the P50 crossing on 3 consecutive daily runs. Severity by lead time: CRITICAL < 2 wks, WARNING 2–8 wks, PLAN > 8 wks. Anything less is HOLD. |
+| 5b | `confidence.py` | 0–100 confidence on every alert: ETA-range tightness (35%), trend fit R² (25%), days of data (20%), agreement of the last 3 daily runs (20%). High ≥ 75, Medium ≥ 50. |
 | 6 | `attribution.py` | Computes each tenant's slope over the same fit window, its % share of growth, and the top driver "since <change point>". |
 | 7 | `backtest.py` | Replays the pipeline **every day**, using only data up to that day. Reports lead time, false alarms, spikes that alerted, and MAPE. |
 | 8 | `audit.py` | Writes `audit/forecast_log.jsonl` (live runs) and `audit/backtest_log.jsonl` (replays). |
 | – | `engine.py` | The single entry point. The app and the backtest both call it, so the Validation tab measures exactly what operators see. |
+
+## Dashboard
+
+* **Capacity outlook** (homepage): every resource on one rack as % of capacity. Solid = actual
+  (7-day median), dashed = P50 forecast. Yellow lines rise from the x-axis where an alerting
+  forecast reaches the safe limit, red lines where it reaches full capacity, each labelled with
+  the ETA and confidence.
+* **Tenant demand by workload**: same chart style for Compute / Storage / Network on a rack, one
+  line per tenant plus the rack total (operator only).
+* Tenants see the same chart for their own workloads only, with no capacity or other tenants.
 
 ## Results on the synthetic data (`selfcheck.py`)
 

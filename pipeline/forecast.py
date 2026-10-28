@@ -65,6 +65,9 @@ def forecast(raw: pd.Series, cutoff=None, fit_start=None, cps=None):
         return np.column_stack(cols + ([(idx >= shift_at).astype(float)] if shift_at else []))
 
     coef = np.linalg.lstsq(design(win.index), win.values, rcond=None)[0]
+    ss_res = float(np.sum((win.values - design(win.index) @ coef) ** 2))
+    ss_tot = float(np.sum((win.values - win.values.mean()) ** 2))
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0     # goodness of the trend fit
     slope, intercept = coef[0], coef[1] + (coef[2] if shift_at else 0.0)
     # Band width: robust (MAD) std of the RAW daily values around the trend, so weekly
     # seasonality and day-to-day noise count, but a one-off spike does not blow up the band.
@@ -78,7 +81,7 @@ def forecast(raw: pd.Series, cutoff=None, fit_start=None, cps=None):
     return {
         "cutoff": cutoff, "fit_start": win.index[0], "fit_end": win.index[-1],
         "change_points": cps, "slope": float(slope), "intercept": float(intercept),
-        "level_shift_at": shift_at, "resid_std": resid_std, "n_fit": len(win),
+        "level_shift_at": shift_at, "resid_std": resid_std, "n_fit": len(win), "r2": r2,
         "last_level": float(win.iloc[-1]),
         "dates": cutoff + pd.to_timedelta(h, unit="D"),
         "p10": p50 - spread, "p50": p50, "p90": p50 + spread,

@@ -17,7 +17,7 @@ def new_run_id():
 
 
 def record(run_id, viewer, rack, resource, fc, eta=None, status=None, driver=None,
-           run_type="live", tenant=None, sustain_history=None):
+           run_type="live", tenant=None, sustain_history=None, confidence=None):
     return {
         "run_id": run_id, "run_type": run_type,
         "run_timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -28,10 +28,10 @@ def record(run_id, viewer, rack, resource, fc, eta=None, status=None, driver=Non
         "model_params": None if fc is None else {
             "slope_per_day": round(fc["slope"], 6), "intercept": round(fc["intercept"], 4),
             "resid_std": round(fc["resid_std"], 6), "n_fit_days": fc["n_fit"],
-            "level_shift_at": _d(fc["level_shift_at"])},
+            "level_shift_at": _d(fc["level_shift_at"]), "r2": round(fc["r2"], 4)},
         "input_sha256": fc and fc["input_sha256"],
         "outputs": {"eta_days": eta, "severity": status, "top_driver": driver,
-                    "p50_eta_last_runs": sustain_history},
+                    "p50_eta_last_runs": sustain_history, "confidence": confidence},
     }
 
 

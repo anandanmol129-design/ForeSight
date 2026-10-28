@@ -1,0 +1,43 @@
+# Operations-console look: deep navy surfaces, teal accent, Inter + JetBrains Mono.
+# Locked to dark: the Plotly figures in app.py are styled for this palette.
+[client]
+toolbarMode = "viewer"
+
+[theme]
+base = "dark"
+primaryColor = "#14b8a6"
+backgroundColor = "#0b1220"
+secondaryBackgroundColor = "#111a2e"
+textColor = "#e2e8f0"
+linkColor = "#5eead4"
+borderColor = "#1e2a44"
+codeBackgroundColor = "#0f182b"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "0.6rem"
+buttonRadius = "0.5rem"
+baseFontSize = 14
+headingFontSizes = ["1.75rem", "1.25rem", "1rem"]
+headingFontWeights = [700, 600, 600]
+metricValueFontSize = "2rem"
+metricValueFontWeight = 600
+linkUnderline = false
+paddingTop = "1.25rem"
+redColor = "#f43f5e"
+orangeColor = "#f59e0b"
+yellowColor = "#facc15"
+blueColor = "#3b82f6"
+greenColor = "#10b981"
+violetColor = "#8b5cf6"
+grayColor = "#64748b"
+dataframeHeaderBackgroundColor = "#0f182b"
+dataframeBorderColor = "#1e2a44"
+chartCategoricalColors = ["#38bdf8", "#2dd4bf", "#a78bfa", "#f472b6", "#a3e635",
+                          "#fbbf24", "#94a3b8", "#fb7185", "#60a5fa", "#c4b5fd"]
+
+[theme.sidebar]
+backgroundColor = "#080e1a"
+secondaryBackgroundColor = "#111a2e"
+borderColor = "#1a2540"
