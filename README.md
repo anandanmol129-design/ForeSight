@@ -1,4 +1,4 @@
-# AO-02 · Seeing trouble before the capacity runs out
+# ForeSight (AO-02) · Seeing trouble before the capacity runs out
 
 A read-only early-warning tool for a multi-tenant data centre. For every rack × resource
 it tells an operator **which** resource will run out, **when** (with a range), **why**
@@ -38,20 +38,21 @@ replays every day of history, which takes about 45 s.
   (7-day median), dashed = P50 forecast. Yellow lines rise from the x-axis where an alerting
   forecast reaches the safe limit, red lines where it reaches full capacity, each labelled with
   the ETA and confidence.
-* **Tenant demand by workload**: same chart style for Compute / Storage / Network on a rack, one
+* **Tenant demand by workload**: same chart style for Compute / Storage / Network / Licences on a rack, one
   line per tenant plus the rack total (operator only).
 * Tenants see the same chart for their own workloads only, with no capacity or other tenants.
 
 ## Results on the synthetic data (`selfcheck.py`)
 
-* **3/3** historical exhaustion events caught. Mean lead time **11.2 weeks**, minimum 9.9.
+* **4/4** historical exhaustion events caught (storage, licences, power, VMs). Mean lead time
+  **12.7 weeks**, minimum 9.9.
   At the first alert, the predicted ETA was within ±0.3 weeks of the real date.
 * **0** false alarms. **0/5** short spikes raised an alert.
-* MAPE of the P50 path: **2.1 %** over the 30 days before each event, **2.9 %** over the last 30 days.
+* MAPE of the P50 path: **1.7 %** over the 30 days before each event, **2.5 %** over the last 30 days.
 * Live state at the end of the data:
   * CRITICAL: rack-1 network (tenant-C)
   * WARNING: rack-4 storage (tenant-E, since onboarding)
-  * PLAN: rack-2 storage
+  * PLAN: rack-4 licences (tenant-E) and rack-2 storage
 
 These numbers come from a generator I designed, so they show the method works, not that it
 will score this well on the real data.
@@ -61,7 +62,10 @@ will score this well on the real data.
 1. **Data.** `./data/` was empty, so synthetic data is used. `pipeline/synthetic.py` writes
    it to `synthetic_data/`, never into `./data/`. It covers 4 racks, 5 tenants and 365 days
    of hourly data.
-   * `storage_tb`, `network_gbps` and `vm_count` are reported per tenant.
+   * `storage_tb`, `network_gbps`, `vm_count` and `licences` are reported per tenant.
+   * `licences` = software licence seats in use, pooled per rack (capacity 250 seats,
+     margin 25). The brief names licence counts as an exhaustion case but the dataset list
+     does not, so I added them; any countable pool with a hard cap works the same way.
    * `power_kw` and `temp_c` are rack-level, with tenant = null. They cannot be attributed
      to a tenant, and the app says so.
 2. **Event dates** for the synthetic exhaustions are the day the noise-free level crosses
@@ -134,7 +138,7 @@ will score this well on the real data.
      * Matching ignores case. If nothing matches, the Validation tab and `selfcheck.py`
        print the event types actually found.
    * **Resource names** — **line 47**: `RESOURCE_ALIASES`, mapping real names onto
-     `power_kw`, `temp_c`, `storage_tb`, `network_gbps` and `vm_count`.
+     `power_kw`, `temp_c`, `storage_tb`, `network_gbps`, `vm_count` and `licences`.
      * Line 55: `RACK_LEVEL_RESOURCES`. If these metrics are repeated on every tenant row,
        they are de-duplicated rather than summed.
      * Lines 56–57: `DAILY_AGG` and `UNITS`, for new resources.

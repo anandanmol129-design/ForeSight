@@ -5,3 +5,7 @@ audit/
 .cache/
 synthetic_data/
 raw_data/
+data_phone/
+.agents/
+.claude/
+*.zip

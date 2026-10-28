@@ -1,21 +1,26 @@
 """Capacity early-warning dashboard (AO-02). Read-only: never changes facility controls."""
+from html import escape
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 import config
+import ui_fx
+import ui_story
 from pipeline import audit, backtest, clean, engine, loader
-from pipeline.exhaustion import first_crossing, weeks
+from pipeline.exhaustion import first_crossing
 from pipeline.forecast import smooth
 
-st.set_page_config(page_title="Capacity Early Warning", page_icon=":material/monitoring:",
-                   layout="wide")
+st.set_page_config(page_title="ForeSight · Capacity Early Warning", page_icon=":material/monitoring:",
+                   layout="wide", initial_sidebar_state="expanded")
 
 # One palette for every Plotly figure; matches .streamlit/config.toml
-UI = {"bg": "#0b1220", "panel": "#111a2e", "grid": "#1a2540", "line": "#2a3a5c",
-      "text": "#cbd5e1", "muted": "#94a3b8", "faint": "#64748b", "strong": "#f1f5f9",
-      "accent": "#14b8a6", "font": "Inter, Segoe UI, sans-serif"}
+UI = {"bg": "#050505", "panel": "#0d0d0d", "grid": "#1c1c1c", "line": "#2e2e2e",
+      "text": "#d4d4d4", "muted": "#a3a3a3", "faint": "#6b6b6b", "strong": "#f5f5f5",
+      "accent": "#f2f2f2", "font": "Inter, Segoe UI, sans-serif",
+      "mono": "JetBrains Mono, ui-monospace, monospace"}
 # Translucent tints keep the theme's own text colour readable on the dark panels
 SEV_COLOR = {"CRITICAL": "rgba(244, 63, 94, 0.16)", "WARNING": "rgba(245, 158, 11, 0.14)",
              "PLAN": "rgba(59, 130, 246, 0.14)", "HOLD": "rgba(100, 116, 139, 0.16)", "OK": None}
@@ -31,18 +36,58 @@ PALETTE = ["#38bdf8", "#2dd4bf", "#a78bfa", "#f472b6", "#a3e635", "#94a3b8", "#6
 GAUGE_GREEN, GAUGE_YELLOW, GAUGE_RED = ("rgba(16, 185, 129, 0.75)", "rgba(234, 179, 8, 0.75)",
                                         "rgba(244, 63, 94, 0.8)")
 ATTN_YELLOW, ATTN_RED = "#facc15", "#f43f5e"       # attention lines: safe limit / full
+TOTAL_COLOR = "#fb923c"                            # rack total: outside the tenant palette
 # Line colours avoid yellow/red so the attention lines always stand out
 RES_COLOR = {"storage_tb": "#38bdf8", "network_gbps": "#2dd4bf", "vm_count": "#a78bfa",
-             "power_kw": "#f472b6", "temp_c": "#94a3b8"}
+             "power_kw": "#f472b6", "temp_c": "#94a3b8", "licences": "#a3e635",
+             "cpu_pct": "#38bdf8", "mem_pct": "#a78bfa", "disk_io_pct": "#2dd4bf"}
 TENANT_COLOR_LIST = ["#38bdf8", "#2dd4bf", "#a78bfa", "#f472b6", "#a3e635", "#94a3b8"]
-WORKLOADS = {"Compute": "vm_count", "Storage": "storage_tb", "Network": "network_gbps"}
+WORKLOADS = {"Compute": "vm_count", "Storage": "storage_tb", "Network": "network_gbps",
+             "Licences": "licences",
+             "CPU": "cpu_pct", "Memory": "mem_pct", "Disk I/O": "disk_io_pct"}
+
+
+def available_workloads(rows):
+    """The WORKLOADS this data actually has - each data centre measures different things."""
+    present = {r["resource"] for r in rows}
+    return {wl: res for wl, res in WORKLOADS.items() if res in present}
 ALERTING = ("CRITICAL", "WARNING", "PLAN")
 HISTORY_DAYS = 180
+
+# ---------------------------------------------------------------- data-centre record
+RECORDS = config.records()
+
+
+def new_record():
+    """Rack, workload and tenant picks belong to the previous record - start fresh."""
+    for k in list(st.session_state):
+        if k != "record":
+            del st.session_state[k]
+
+
+with st.sidebar:
+    record = st.selectbox(
+        "Data centre", list(RECORDS), key="record", on_change=new_record,
+        index=next((i for i, p in enumerate(RECORDS.values()) if config.is_active(p)), 0),
+        help="Each record is a separate data centre with its own audit log.")
+if not config.is_active(RECORDS[record]):     # keeps a test's redirected audit dir intact
+    config.use_record(RECORDS[record])
+
+# Daily records show durations in weeks. An hourly record stores each real hour as one model
+# day counted from its epoch, so it shows durations in hours and times as "Day N HH:00".
+HOURLY = config.RECORD["step"] == "hour"
+EPOCH = pd.Timestamp(config.RECORD["epoch"])
+UNIT_DAYS, U, U_LONG = (1, "h", "hours") if HOURLY else (7, "wks", "weeks")
+STEP, RUNS = ("hour", "hourly") if HOURLY else ("day", "daily")
+if HOURLY:
+    st.sidebar.caption("1 model step = 1 real hour. Times read *Day N HH:00* of the trace; "
+                       "Validation and Audit tables keep model dates (2000-01-01 = Day 1 00:00).")
 
 
 # ---------------------------------------------------------------- cached data access
 @st.cache_data(show_spinner="Loading telemetry…")
-def load():
+def load(data_dir):
+    """data_dir is only the cache key: one cached load per data-centre record."""
     tel, lim, ev, source = loader.load()
     return tel, lim, ev, source, loader.data_hash(tel)
 
@@ -51,7 +96,7 @@ def load():
 def series_for(viewer, data_hash):
     """TENANT ISOLATION: a tenant's rows are filtered out BEFORE any computation, and a
     tenant view never gets rack totals (they would reveal other tenants' usage)."""
-    tel = load()[0]
+    tel = load(str(config.DATA_DIR))[0]
     if viewer != "Operator":
         tel = tel[tel["tenant"] == viewer]
         return {}, clean.build_series(tel)[1]
@@ -61,7 +106,7 @@ def series_for(viewer, data_hash):
 @st.cache_data(show_spinner="Forecasting…")
 def operator_run(data_hash, cutoff):
     rack_series, tenant_series = series_for("Operator", data_hash)
-    return engine.run_operator(rack_series, tenant_series, load()[1], cutoff)  # audited once
+    return engine.run_operator(rack_series, tenant_series, load(str(config.DATA_DIR))[1], cutoff)  # audited once
 
 
 @st.cache_data(show_spinner="Forecasting…")
@@ -78,20 +123,74 @@ def tenant_breakdown(data_hash, cutoff):
 @st.cache_data(show_spinner="Back-testing every day of history (cached after first run)…")
 def validation(data_hash):
     rack_series, _ = series_for("Operator", data_hash)
-    _, lim, ev, _, _ = load()
+    _, lim, ev, _, _ = load(str(config.DATA_DIR))
     return backtest.run(rack_series, lim, ev)
 
 
 # ---------------------------------------------------------------- helpers
-def fmt_weeks(d):
-    return "—" if d is None else ("now" if d == 0 else f"{weeks(d)}")
+def dur(days):
+    """Model days -> the display unit U (weeks, or hours on an hourly record); None/NaN safe."""
+    return None if days is None or days != days else round(days / UNIT_DAYS, 1)
+
+
+def span(days):
+    return f"{days // UNIT_DAYS} {U_LONG}"
+
+
+def when(ts):
+    if not HOURLY:
+        return f"{ts:%d %b %Y}"
+    h = (ts - EPOCH) // pd.Timedelta(days=1)
+    return f"Day {h // 24 + 1} {h % 24:02d}:00"
+
+
+def real_time(fig):
+    """Hourly record: squeeze the date axis back to real time (1 model day -> 1 hour)."""
+    if not HOURLY:
+        return fig
+
+    def f(x):
+        return None if x is None else EPOCH + (pd.Timestamp(x) - EPOCH) / 24
+    for t in fig.data:
+        if t.x is not None:
+            t.x = [f(x) for x in t.x]
+    for sh in fig.layout.shapes:
+        if (sh.xref or "x") == "x":
+            sh.x0, sh.x1 = f(sh.x0), f(sh.x1)
+    for an in fig.layout.annotations:
+        if (an.xref or "x") == "x":
+            an.x = f(an.x)
+    if fig.layout.xaxis.range:
+        fig.update_xaxes(range=[f(x) for x in fig.layout.xaxis.range])
+    return fig.update_xaxes(tickformat="Day %-j<br>%H:%M", hoverformat="Day %-j %H:%M")
+
+
+def safe_in(d, bold=False):
+    """'safe limit in 3.4 wks', or 'past safe limit' when it is already crossed."""
+    if d == 0:
+        return "past safe limit"
+    v = f"{fmt_eta(d)} {U}"
+    return f"safe limit in **{v}**" if bold else f"safe limit in {v}"
+
+
+def fmt_eta(d):
+    return "—" if d is None else ("now" if d == 0 else f"{dur(d)}")
 
 
 def eta_range(e):
     if e["likely"] is None and e["earliest"] is None:
         return "beyond horizon"
-    latest = fmt_weeks(e["latest"]) if e["latest"] is not None else f">{config.HORIZON_DAYS // 7}"
-    return f"{fmt_weeks(e['earliest'])}–{latest} wks"
+    latest = fmt_eta(e["latest"]) if e["latest"] is not None else f">{config.HORIZON_DAYS // UNIT_DAYS}"
+    return f"{fmt_eta(e['earliest'])}–{latest} {U}"
+
+
+def eta_title(r):
+    e, name = r["eta"], f"{r['rack']} {r['resource']}"
+    if e["likely"] == 0:
+        return f"{name}: ALREADY past the safety margin"
+    if e["likely"] is None:
+        return f"{name}: no exhaustion expected within {span(config.HORIZON_DAYS)}"
+    return f"{name}: likely in {dur(e['likely'])} {U_LONG} ({eta_range(e)})"
 
 
 def styled(fig, height=320, legend=True):
@@ -115,15 +214,24 @@ def plot(fig):
 
 
 _panel_ids = iter(range(10_000))      # unique keys per run so panels can share CSS styling
+_section_no = iter(range(1, 100))     # visible section numbers, restart on every tab
 
 
 def panel(title, icon=None, sub=None):
-    """A bordered dashboard card with an icon, title and optional one-line subtitle."""
+    """A bordered HUD card: numbered mono section header, optional one-line subtitle.
+    icon is kept for call-site readability; the header style replaces it visually."""
     box = st.container(border=True, key=f"panel_{next(_panel_ids)}")
-    box.markdown(f"{':primary[' + icon + ']  ' if icon else ''}**{title}**")
-    if sub:
-        box.caption(sub)
+    sub_html = f'<p class="ph-sub">{escape(sub)}</p>' if sub else ""
+    box.html(f'<div class="ph"><span class="ph-idx">{next(_section_no):02d}</span>'
+             f'<span class="ph-title">{escape(title)}</span><span class="ph-rule"></span></div>'
+             f"{sub_html}")
     return box
+
+
+def new_tab():
+    """Restart section numbering at 01 for each tab."""
+    global _section_no
+    _section_no = iter(range(1, 100))
 
 
 def kpi(label_, value, tone="neutral", **kw):
@@ -151,9 +259,9 @@ def gauge(r):
     safe = 100 * r["threshold"] / r["capacity"]
     e = r["eta"]
     sub = ("past safe limit" if e["likely"] == 0 else
-           f"safe limit in {weeks(e['likely'])} wks · {r['confidence']['score']}% conf"
+           f"safe limit in {dur(e['likely'])} {U} · {r['confidence']['score']}% conf"
            if e["likely"] and r["confidence"] else
-           f"safe limit in {weeks(e['likely'])} wks" if e["likely"] else
+           f"safe limit in {dur(e['likely'])} {U}" if e["likely"] else
            "no exhaustion forecast")
     fig = go.Figure(go.Indicator(
         mode="gauge", value=used, domain=dict(x=[0.05, 0.95], y=[0.3, 1]),
@@ -184,11 +292,11 @@ def add_attention(fig, r, scale, name, i):
     marks = []
     if e["likely"] is not None:
         marks.append((e["likely"], r["threshold"], ATTN_YELLOW,
-                      f"{name}: safe limit in {fmt_weeks(e['likely'])} wks · "
+                      f"{name}: {safe_in(e['likely'])} · "
                       f"{conf_text(r['confidence'])}"))
     full = first_crossing(fc["p50"], r["capacity"])
     if full is not None:
-        marks.append((full, r["capacity"], ATTN_RED, f"{name}: full in {weeks(full)} wks"))
+        marks.append((full, r["capacity"], ATTN_RED, f"{name}: full in {dur(full)} {U}"))
     for j, (days, level, color, text) in enumerate(marks):
         d, y = fc["cutoff"] + pd.Timedelta(days=days), level * scale
         fig.add_shape(type="line", x0=d, x1=d, y0=0, y1=y, line=dict(color=color, width=2.5))
@@ -198,7 +306,7 @@ def add_attention(fig, r, scale, name, i):
                                  hovertemplate=f"{text}<extra></extra>"))
         fig.add_annotation(x=d, y=y, text=text, showarrow=False, xanchor="right",
                            yshift=14 + 18 * (2 * i + j), xshift=-6,
-                           font=dict(color=color, size=11), bgcolor="rgba(11,18,32,0.9)",
+                           font=dict(color=color, size=11), bgcolor="rgba(10,10,10,0.9)",
                            bordercolor=color, borderwidth=1, borderpad=3)
 
 
@@ -230,7 +338,7 @@ def trend_chart(items, y_title, cutoff, attention=(), refs=(), height=440):
         fig.add_hline(y=y, line=dict(color=color, dash="dot", width=1), annotation_text=text,
                       annotation_font_color=color, annotation_position="top left")
     fig.add_vrect(x0=cutoff, x1=cutoff + pd.Timedelta(days=config.HORIZON_DAYS),
-                  fillcolor="rgba(20, 184, 166, 0.04)", line_width=0, layer="below")
+                  fillcolor="rgba(255, 255, 255, 0.025)", line_width=0, layer="below")
     fig.add_shape(type="line", x0=cutoff, x1=cutoff, yref="paper", y0=0, y1=1,
                   line=dict(color=UI["muted"], dash="dot", width=1))
     fig.add_annotation(x=cutoff, yref="paper", y=1.03, text="TODAY", showarrow=False,
@@ -245,7 +353,7 @@ def trend_chart(items, y_title, cutoff, attention=(), refs=(), height=440):
                       legend=dict(orientation="h", y=-0.12, x=0, xanchor="left"))
     fig.update_xaxes(range=[start, cutoff + pd.Timedelta(days=config.HORIZON_DAYS)])
     fig.update_yaxes(rangemode="tozero")
-    return fig
+    return real_time(fig)
 
 
 def status_help(status, rows):
@@ -253,8 +361,8 @@ def status_help(status, rows):
     hits = [r for r in rows if r["status"] == status]
     if not hits:
         return f"No {status} series right now."
-    lines = [f"- **{r['rack']} · {r['resource']}** — safe limit in "
-             f"{fmt_weeks(r['eta']['likely'])} wks ({eta_range(r['eta'])}), "
+    lines = [f"- **{r['rack']} · {r['resource']}** — {safe_in(r['eta']['likely'])} "
+             f"({eta_range(r['eta'])}), "
              f"{conf_text(r['confidence'])}; {r['driver']}" for r in hits]
     return "\n".join(lines) + f"\n\n**Action:** {config.RECOMMENDATION[status]}"
 
@@ -262,15 +370,15 @@ def status_help(status, rows):
 def alert_line(r):
     e = r["eta"]
     return (f"{sev_badge(r['status'])} **{r['rack']} · {r['resource']}** — "
-            f"safe limit in **{fmt_weeks(e['likely'])} wks** ({eta_range(e)}) · "
+            f"{safe_in(e['likely'], bold=True)} ({eta_range(e)}) · "
             f"{conf_text(r['confidence'])} · driver: {r['driver']}")
 
 
 def chart(raw, fc, title, unit, cap=None, thr=None, events=None, height=480):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=raw.index, y=raw.values, name="Daily", mode="lines",
+    fig.add_trace(go.Scatter(x=raw.index, y=raw.values, name=RUNS.capitalize(), mode="lines",
                              line=dict(color="rgba(148, 163, 184, 0.45)", width=1)))
-    fig.add_trace(go.Scatter(x=raw.index, y=smooth(raw).values, name="7-day median",
+    fig.add_trace(go.Scatter(x=raw.index, y=smooth(raw).values, name=f"7-{STEP} median",
                              line=dict(color="#38bdf8", width=2.5)))
     if fc is not None:
         x = list(fc["dates"]) + list(fc["dates"][::-1])
@@ -304,7 +412,7 @@ def chart(raw, fc, title, unit, cap=None, thr=None, events=None, height=480):
                       yaxis_title=unit,
                       hovermode="x unified", margin=dict(t=60),
                       legend=dict(orientation="h", y=-0.12, x=0, xanchor="left"))
-    return fig
+    return real_time(fig)
 
 
 def explanation(r):
@@ -312,18 +420,18 @@ def explanation(r):
     if e["likely"] == 0:
         head = f"**{res} on {rack} is already past its safety margin.**"
     elif e["likely"] is not None:
-        head = (f"**{res} on {rack} will likely run out in ~{weeks(e['likely'])} weeks** "
+        head = (f"**{res} on {rack} will likely run out in ~{dur(e['likely'])} {U_LONG}** "
                 f"({eta_range(e)}).")
     elif e["earliest"] is not None:
         head = (f"{res} on {rack} is not expected to run out within "
-                f"{config.HORIZON_DAYS // 7} weeks; worst case {weeks(e['earliest'])} weeks.")
+                f"{span(config.HORIZON_DAYS)}; worst case {dur(e['earliest'])} {U_LONG}.")
     else:
-        head = f"{res} on {rack} has no forecast exhaustion within {config.HORIZON_DAYS // 7} weeks."
+        head = f"{res} on {rack} has no forecast exhaustion within {span(config.HORIZON_DAYS)}."
     top, fc = r["top"], r["fc"]
     if top is not None:
         since = ""
         if fc["change_points"] and fc["fit_start"] == fc["change_points"][-1]:
-            since = f" since {fc['fit_start']:%d %b %Y}, when the trend changed"
+            since = f" since {when(fc['fit_start'])}, when the trend changed"
         why = f" {top['share_pct']:.0f}% of the growth comes from **{top['tenant']}**{since}."
     elif r["shares"] == [] and "rack-level" in r["driver"]:
         why = " This is a rack-level metric, so it cannot be split by tenant."
@@ -331,13 +439,14 @@ def explanation(r):
         why = " No tenant is growing significantly."
     note = ""
     if r["status"] == "HOLD":
-        note = (" A crossing is forecast but not yet confirmed (needs 3 consecutive daily runs "
-                "and 3 weeks of data after any change point).")
+        note = (f" A crossing is forecast but not yet confirmed (needs {config.SUSTAIN_RUNS} "
+                f"consecutive {RUNS} runs and {span(config.MIN_FIT_DAYS)} of data after any "
+                "change point).")
     return f"{head}{why}{note}\n\n**Recommended:** {r['recommendation']}"
 
 
 # ---------------------------------------------------------------- page
-tel, lim, ev, source, h = load()
+tel, lim, ev, source, h = load(str(config.DATA_DIR))
 tenants = sorted(tel["tenant"].dropna().unique())
 TENANT_COLOR = {t: TENANT_COLOR_LIST[i % len(TENANT_COLOR_LIST)] for i, t in enumerate(tenants)}
 cutoff = tel["timestamp"].max().normalize()
@@ -345,41 +454,129 @@ cutoff = tel["timestamp"].max().normalize()
 ASSETS = config.ROOT / "assets"
 st.html(ASSETS / "style.css")
 st.logo(ASSETS / "logo.svg", icon_image=ASSETS / "mark.svg", size="large")
+ui_fx.ambient()
 
 with st.sidebar:
     viewer = st.selectbox("View as", ["Operator"] + tenants,
                           help="Simulates login. A tenant sees only their own usage.")
-    st.divider()
-    st.html('<p class="side-label">Environment</p>')
-    st.caption(f":material/database: Data source · **{source}**")
-    st.caption(f":material/event: Data as of · **{cutoff:%d %b %Y}**")
-    st.caption(f":material/schedule: Horizon · **{config.HORIZON_DAYS // 7} weeks**")
-    st.caption(f":material/repeat: Alerts confirm after **{config.SUSTAIN_RUNS}** daily runs")
-    st.divider()
-    st.caption(":material/lock: Read-only · never changes facility controls")
+    st.html(f'''<dl class="side-kv"><dt>Source</dt><dd>{escape(source)}</dd>
+<dt>Data as of</dt><dd>{when(cutoff)}</dd>
+<dt>Horizon</dt><dd>{config.HORIZON_DAYS // UNIT_DAYS} {U}</dd>
+<dt>Confirm</dt><dd>{config.SUSTAIN_RUNS} {RUNS} runs</dd></dl>''')
+    st.html('<div class="side-foot"><span class="led"></span>Read-only · no facility '
+            'control</div>')
 
 results = operator_run(h, cutoff) if viewer == "Operator" else tenant_run(viewer, h, cutoff)
 
-with st.container(key="hero"):
-    with st.container(horizontal=True, vertical_alignment="center"):
-        st.html('<p class="eyebrow">AO-02 · Capacity intelligence</p>')
-        st.space("stretch")
-        if viewer == "Operator":
-            counts = {s_: sum(r["status"] == s_ for r in results) for s_ in ALERTING}
-            worst_ = next((s_ for s_ in ALERTING if counts[s_]), None)
-            if worst_:
-                st.badge(f"{counts[worst_]} {worst_.lower()} alert{'s' * (counts[worst_] > 1)}",
-                         icon=SEV_ICON[worst_], color=SEV_BADGE[worst_])
-            else:
-                st.badge("All capacity within plan", icon=SEV_ICON["OK"], color="green")
-        else:
-            st.badge(f"Signed in as {viewer}", icon=":material/person:", color="blue")
-        st.badge("Read-only", icon=":material/lock:", color="gray",
-                 help="This tool reads telemetry and never changes facility controls.")
-    st.markdown("# Seeing trouble before the capacity runs out")
-    st.caption(f"Forecasts every rack × resource {config.HORIZON_DAYS // 7} weeks ahead — which "
-               f"resource runs out, when, why, and what to do.  ·  Data as of "
-               f"**{cutoff:%d %b %Y}** · source **{source}**")
+
+def story_payload(rows):
+    """Operator-only data for the scroll story: each rack's combined resource chart and the
+    tenant split of each workload. Never built for a tenant view."""
+    rack_series, tenant_series = series_for("Operator", h)
+    start = cutoff - pd.Timedelta(days=HISTORY_DAYS)
+    end = cutoff + pd.Timedelta(days=config.HORIZON_DAYS)
+    if HOURLY:      # one tick per real day = every 24 model days from the epoch
+        ticks = [[(EPOCH - cutoff).days + 24 * k, f"Day {k + 1}"]
+                 for k in range(-(-(start - EPOCH).days // 24), (end - EPOCH).days // 24 + 1)]
+    else:
+        ticks, m = [], (start + pd.offsets.MonthBegin(1))
+        while m <= end:
+            ticks.append([(m - cutoff).days, f"{m:%b}" + (f" {m:%y}" if m.month == 1 else "")])
+            m += pd.offsets.MonthBegin(1)
+    racks = []
+    for rack in sorted({r["rack"] for r in rows}):
+        mine = sorted((r for r in rows if r["rack"] == rack and r["fc"]),
+                      key=lambda r: r["resource"])
+        worst = min(mine, key=lambda r: (SEV_ORDER[r["status"]],
+                                         -r["fc"]["last_level"] / r["capacity"]))
+        series, ymax = [], 100.0
+        for r in mine:
+            k, fc, e = 100 / r["capacity"], r["fc"], r["eta"]
+            # dropna: real data has gaps, and NaN is not valid JSON for the story component
+            sm = smooth(rack_series[(rack, r["resource"])]).loc[start:].dropna() * k
+            actual = [[(d - cutoff).days, round(float(v), 2)] for d, v in sm.iloc[::3].items()]
+            fdays = [(d - cutoff).days for d in fc["dates"]]
+            forecast = [[0, round(fc["last_level"] * k, 2)]] + [
+                [d, round(float(v) * k, 2)] for d, v in zip(fdays[2::3], fc["p50"][2::3])]
+            marks = []
+            if r["status"] in ALERTING:
+                if e["likely"] is not None:
+                    marks.append({"kind": "safe", "day": e["likely"],
+                                  "level": round(r["threshold"] * k, 1),
+                                  "text": f"{r['resource'].split('_')[0]} safe limit "
+                                          f"{fmt_eta(e['likely'])}{U[0]}"})
+                full = first_crossing(fc["p50"], r["capacity"])
+                if full is not None:
+                    marks.append({"kind": "full", "day": full, "level": 100,
+                                  "text": f"full {dur(full)}{U[0]}"})
+            ymax = max(ymax, *(v for _, v in actual), *(v for _, v in forecast))
+            series.append({"name": r["resource"], "color": RES_COLOR.get(r["resource"], UI["text"]),
+                           "actual": actual, "forecast": forecast, "marks": marks,
+                           "alert": r["status"] in ALERTING})
+        we = worst["eta"]
+        headline = (f"{worst['resource']}: {safe_in(we['likely'])} "
+                    f"({eta_range(we)}) · {conf_text(worst['confidence'])} · driver "
+                    f"{worst['driver']}" if worst["status"] in ALERTING
+                    else "All resources inside plan over the forecast horizon.")
+        racks.append({"name": rack, "status": worst["status"], "headline": headline,
+                      "used": round(worst["fc"]["last_level"] / worst["capacity"], 3),
+                      "ymax": round(ymax, 1), "series": series})
+
+    tenants = {}
+    for r in rows:
+        if r["resource"] not in WORKLOADS.values() or not r["fc"]:
+            continue
+        shares = [{"tenant": t, "pct": round(100 * float(smooth(ser).iloc[-1]) / r["capacity"], 2)}
+                  for (rk, res, t), ser in tenant_series.items()
+                  if rk == r["rack"] and res == r["resource"]]
+        tenants.setdefault(r["rack"], {})[r["resource"]] = {
+            "shares": sorted(shares, key=lambda x: -x["pct"]),
+            "used": round(100 * r["fc"]["last_level"] / r["capacity"], 2),
+            "safe": round(100 * r["threshold"] / r["capacity"], 2)}
+
+    counts = {s_: sum(r["status"] == s_ for r in rows) for s_ in ALERTING}
+    nearest = min((r["eta"]["likely"] for r in rows if r["eta"]["likely"] is not None),
+                  default=None)
+    hud = [["IST clock", "--:--:-- IST", ""],
+           ["Data as of", when(cutoff), ""],
+           ["Critical", str(counts["CRITICAL"]), "crit" if counts["CRITICAL"] else ""],
+           ["Warning", str(counts["WARNING"]), "warn" if counts["WARNING"] else ""],
+           ["Plan", str(counts["PLAN"]), "plan" if counts["PLAN"] else ""],
+           ["Soonest ETA", f"{dur(nearest)} {U}" if nearest is not None else "—", ""]]
+    return {"racks": racks, "tenants": tenants, "ticks": ticks, "hud": hud,
+            "critical": counts["CRITICAL"],
+            "workloads": [[wl, res] for wl, res in available_workloads(rows).items()],
+            "tenant_colors": TENANT_COLOR, "smooth_win": f"7-{STEP}",
+            "lede": f"{len(rows)} rack × resource series from {source} telemetry, forecast "
+                    f"{span(config.HORIZON_DAYS)} ahead: which resource runs out, when, why, "
+                    "and what to do."}
+
+
+def readout(cells):
+    return '<dl class="readout">' + "".join(
+        f'<div><dt>{escape(k)}</dt><dd class="{c}">{v}</dd></div>' for k, v, c in cells) + "</dl>"
+
+
+if viewer == "Operator":
+    ui_story.story(story_payload(results))
+else:
+    with st.container(key="hero"):
+        left, right = st.columns([6, 5], vertical_alignment="center", gap="large")
+        with left:
+            st.html('<p class="sysline"><span class="led"></span>AO-02<span class="sep">//</span>'
+                    'Tenant view<span class="sep">//</span>read-only</p>')
+            st.html('<p class="brand"><b>Fore<span>Sight</span></b></p>')
+            st.markdown("# Seeing trouble before the capacity runs out")
+            st.html(f'<p class="lede">Every rack × resource forecast {span(config.HORIZON_DAYS)} '
+                    'ahead: which resource runs out, when, why, and what to do.</p>')
+            st.html(readout([("IST clock", '<span class="hud-clock">--:--:-- IST</span>', "cy"),
+                             ("Data as of", when(cutoff), ""),
+                             ("Scope", escape(viewer).upper(), "cy"),
+                             ("My series", str(len(results)), ""),
+                             ("Visibility", "OWN WORKLOADS", ""),
+                             ("Mode", "READ-ONLY", "ok")]))
+        with right:   # decorative only: no rack, status or capacity data reaches a tenant browser
+            ui_fx.server_hall([{"name": "", "status": "NONE"}] * 4, live=False)
 
 if viewer == "Operator":
     tab1, tab2, tab3, tab4 = st.tabs([":material/dashboard: Overview",
@@ -388,6 +585,7 @@ if viewer == "Operator":
                                       ":material/history: Audit log"])
 
     with tab1:
+        new_tab()
         rows = sorted(results, key=lambda r: (SEV_ORDER[r["status"]],
                                               r["eta"]["likely"] if r["eta"]["likely"] is not None else 9e9))
         statuses = [r["status"] for r in rows]
@@ -403,14 +601,16 @@ if viewer == "Operator":
                     help=status_help(s_, rows))
             kpi(":primary[:material/sensors:] Monitored", len(rows))
             kpi(":primary[:material/timer:] Soonest ETA",
-                f"{weeks(nearest['eta']['likely'])} wks" if nearest else "—",
+                f"{dur(nearest['eta']['likely'])} {U}" if nearest else "—",
                 help=f"{nearest['rack']} · {nearest['resource']}" if nearest else None)
 
         # ---- hero: every resource on one rack, % of capacity, actual vs forecast
         with panel("Capacity outlook", ":material/timeline:",
                    "Every resource on one rack as % of capacity — actual (solid) and P50 "
                    "forecast (dashed)"):
-            rack = st.segmented_control("Rack", racks, default=worst_rack, key="hero_rack",
+            if st.session_state.get("hero_rack") not in racks:
+                st.session_state["hero_rack"] = worst_rack
+            rack = st.segmented_control("Rack", racks, key="hero_rack",
                                         label_visibility="collapsed") or worst_rack
             mine = [r for r in rows if r["rack"] == rack and r["fc"]]
             items = [{"name": r["resource"], "raw": rack_series[(rack, r["resource"])],
@@ -430,9 +630,11 @@ if viewer == "Operator":
                    "One line per tenant plus the rack total — actual (solid) and forecast "
                    "(dashed)"):
             c1, c2 = st.columns([1, 1])
-            wl = c1.segmented_control("Workload", list(WORKLOADS), default="Storage",
-                                      key="wl") or "Storage"
-            res = WORKLOADS[wl]
+            wls = available_workloads(rows)
+            wl_default = "Storage" if "Storage" in wls else next(iter(wls))
+            wl = c1.segmented_control("Workload", list(wls), default=wl_default,
+                                      key="wl") or wl_default
+            res = wls[wl]
             wl_racks = sorted({r["rack"] for r in rows if r["resource"] == res})
             default_rack = next((r["rack"] for r in rows if r["resource"] == res), wl_racks[0])
             t_rack = c2.segmented_control("Rack ", wl_racks, default=default_rack,
@@ -444,7 +646,7 @@ if viewer == "Operator":
             items = [{"name": ten, "raw": tser[(t_rack, res, ten)], "fc": fc_,
                       "color": TENANT_COLOR[ten]} for ten, fc_ in sorted(tfc.items())]
             items.append({"name": f"{t_rack} total", "raw": rack_series[(t_rack, res)],
-                          "fc": total["fc"], "color": UI["strong"], "width": 3})
+                          "fc": total["fc"], "color": TOTAL_COLOR, "width": 3})
             attn = [(total, 1.0, f"{t_rack} total")] if total["status"] in ALERTING else []
             plot(trend_chart(items, f"{wl} ({config.UNITS.get(res, '')})", cutoff, attn,
                              refs=[(total["capacity"], "capacity", UI["faint"]),
@@ -473,7 +675,7 @@ if viewer == "Operator":
             df = pd.DataFrame([{
                 "Status": r["status"], "Rack": r["rack"],
                 "Resource": r["resource"],
-                "Likely ETA (wks)": fmt_weeks(r["eta"]["likely"]), "Range": eta_range(r["eta"]),
+                f"Likely ETA ({U})": fmt_eta(r["eta"]["likely"]), "Range": eta_range(r["eta"]),
                 "Confidence": (f"{r['confidence']['score']}% {r['confidence']['label']}"
                                if r["confidence"] else "—"),
                 "Used now": f"{100 * r['fc']['last_level'] / r['capacity']:.0f}%" if r["fc"] else "—",
@@ -494,6 +696,7 @@ if viewer == "Operator":
                                             st.column_config.TextColumn(width="large")})
 
     with tab2:
+        new_tab()
         # Rack x resource matrix: every cell is a button showing status, % used and ETA
         by_key = {(x["rack"], x["resource"]): x for x in results}
         racks = sorted({x["rack"] for x in results})
@@ -507,7 +710,7 @@ if viewer == "Operator":
             st.session_state["detail_sel"] = key
 
         with panel("Pick a rack and resource", ":material/grid_view:",
-                   "Each cell: % of capacity used · likely weeks until the safe limit"):
+                   f"Each cell: % of capacity used · likely {U_LONG} until the safe limit"):
             header = st.columns([1] + [2] * len(resources), vertical_alignment="center")
             for col, res_ in zip(header[1:], resources):
                 col.markdown(f"**{res_}**")
@@ -521,7 +724,7 @@ if viewer == "Operator":
                         continue
                     used = (f"{100 * cell['fc']['last_level'] / cell['capacity']:.0f}%"
                             if cell["fc"] else "—")
-                    eta = (f"{fmt_weeks(cell['eta']['likely'])} wks"
+                    eta = (f"{fmt_eta(cell['eta']['likely'])} {U}"
                            if cell["eta"]["likely"] is not None else "OK")
                     col.button(f"{used} · {eta}", icon=SEV_ICON[cell["status"]],
                                key=f"cell_{rack_}_{res_}", width="stretch",
@@ -535,16 +738,16 @@ if viewer == "Operator":
         evs = ev[(ev.rack == rack) & (ev.resource == res)]
         with panel(f"{rack} · {res}", ":material/show_chart:",
                    f"Status: {r['status']}"):
-            plot(chart(raw, r["fc"], r["text"], config.UNITS.get(res, ""),
+            plot(chart(raw, r["fc"], eta_title(r), config.UNITS.get(res, ""),
                        r["capacity"], r["threshold"], evs))
         a, b = st.columns([3, 2])
         with a, panel("Why, and what to do", ":material/lightbulb:"):
             st.markdown(explanation(r))
             if r["fc"]:
                 fc = r["fc"]
-                st.caption(f"Fit window {fc['fit_start']:%d %b %Y} → {fc['fit_end']:%d %b %Y} "
-                           f"({fc['n_fit']} days) · slope {fc['slope']:+.3f} "
-                           f"{config.UNITS.get(res, '')}/day · residual σ {fc['resid_std']:.3f}"
+                st.caption(f"Fit window {when(fc['fit_start'])} → {when(fc['fit_end'])} "
+                           f"({fc['n_fit']} {STEP}s) · slope {fc['slope']:+.3f} "
+                           f"{config.UNITS.get(res, '')}/{STEP} · residual σ {fc['resid_std']:.3f}"
                            f" · input sha256 {fc['input_sha256'][:12]}…")
         with b, panel("Share of growth by tenant (%)", ":material/group:"):
             if r["shares"]:
@@ -560,6 +763,7 @@ if viewer == "Operator":
                 st.caption(r["driver"])
 
     with tab3:
+        new_tab()
         if not ev.event_type.isin({t.lower() for t in config.EXHAUSTION_EVENT_TYPES}).any():
             st.warning("No exhaustion events matched, so lead time cannot be measured. "
                        f"Event types in the log: {sorted(ev.event_type.unique())} — add the "
@@ -570,24 +774,28 @@ if viewer == "Operator":
             kpi(":primary[:material/task_alt:] Events caught",
                 f"{s['events_detected']}/{s['events']}")
             kpi(":primary[:material/timer:] Mean lead time",
-                f"{s['mean_lead_weeks']} wks" if s["mean_lead_weeks"] else "—",
-                help="Event date − first sustained alert (replayed daily, only past data)")
+                f"{dur(7 * s['mean_lead_weeks'])} {U}" if s["mean_lead_weeks"] else "—",
+                help=f"Event date − first sustained alert (replayed {RUNS}, only past data)")
             kpi(":primary[:material/notifications_off:] False alarms", s["false_alarms"],
-                help="Alert episodes with no exhaustion inside the predicted window + 14 days")
+                help="Alert episodes with no exhaustion inside the predicted window + "
+                     f"{config.FALSE_ALARM_GRACE_DAYS} {STEP}s")
             kpi(":primary[:material/bolt:] Spike alerts",
                 f"{s['spikes_that_alerted']}/{s['spikes']}")
-            kpi(":primary[:material/target:] Forecast error", f"{s['mape_pre_event_pct']:.1f}%",
-                help=f"MAPE of the P50 forecast over the 30 days before each event. "
-                     f"Over the last 30 days of data: {s['mape_last30_pct']:.1f}%")
+            kpi(":primary[:material/target:] Forecast error",
+                f"{s['mape_pre_event_pct']:.1f}%" if s["mape_pre_event_pct"] is not None else "—",
+                help=f"MAPE of the P50 forecast over the {config.MAPE_HOLDOUT_DAYS} {STEP}s "
+                     f"before each event. Over the last {config.MAPE_HOLDOUT_DAYS} {STEP}s of "
+                     f"data: {s['mape_last30_pct']:.1f}%")
         with panel("Lead time per historical exhaustion event", ":material/timer:"):
             if len(v["leads"]):
                 lw = v["leads"].dropna(subset=["lead_weeks"])
                 fig = go.Figure(go.Bar(
                     x=[f"{r.rack} {r.resource} ({r.event_date})" for r in lw.itertuples()],
-                    y=lw.lead_weeks, marker_color=PALETTE[:len(lw)],
-                    text=lw.lead_weeks.map("{:.1f} wks".format), textposition="outside",
+                    y=7 * lw.lead_weeks / UNIT_DAYS, marker_color=PALETTE[:len(lw)],
+                    text=(7 * lw.lead_weeks / UNIT_DAYS).map(("{:.1f} " + U).format),
+                    textposition="outside",
                     marker_cornerradius=4, textfont=dict(color=UI["text"])))
-                plot(styled(fig, height=260, legend=False).update_yaxes(title="weeks of warning"))
+                plot(styled(fig, height=260, legend=False).update_yaxes(title=f"{U_LONG} of warning"))
             st.dataframe(v["leads"], hide_index=True,
                          column_order=["event_date", "rack", "resource", "lead_weeks",
                                        "first_alert", "first_severity",
@@ -601,8 +809,11 @@ if viewer == "Operator":
             st.dataframe(v["accuracy"].round(2), hide_index=True)
 
     with tab4:
-        log = audit.tail(200)
-        with panel(f"Latest {len(log)} entries · audit/{audit.LOG.name}", ":material/history:",
+        new_tab()
+        log, log_file = audit.tail(200), audit.log_path()
+        if log_file.is_relative_to(config.ROOT):
+            log_file = log_file.relative_to(config.ROOT)
+        with panel(f"Latest {len(log)} entries · {log_file}", ":material/history:",
                    "Append-only; one line per forecast with the hash of its input data."):
             if log:
                 st.dataframe(pd.json_normalize(log), hide_index=True)
@@ -613,13 +824,14 @@ else:
                "other tenants' usage are not shown.")
     tab1, tab2 = st.tabs([":material/dashboard: My trends", ":material/query_stats: Detail"])
     with tab1:
+        new_tab()
         cards = [r for r in results if r["fc"]]
         for i in range(0, len(cards), 4):
             for col, r in zip(st.columns(4), cards[i:i + 4]):
                 with col:
                     kpi(f"{r['rack']} · {r['resource']}", f"{r['fc']['last_level']:.1f}",
-                        delta=round(7 * r["fc"]["slope"], 2) + 0.0,
-                        delta_description="per week")
+                        delta=round(UNIT_DAYS * r["fc"]["slope"], 2) + 0.0,
+                        delta_description=f"per {U_LONG[:-1]}")
         own = series_for(viewer, h)[1]
         mine = {WL: res for WL, res in WORKLOADS.items() if any(r["resource"] == res for r in results)}
         with panel("My demand by workload", ":material/timeline:",
@@ -636,10 +848,11 @@ else:
             st.dataframe(pd.DataFrame([{
                 "Rack": r["rack"], "Resource": r["resource"],
                 "Current": round(r["fc"]["last_level"], 1) if r["fc"] else None,
-                "Trend per week": round(7 * r["fc"]["slope"], 2) if r["fc"] else None,
-                "Projected in 12 wks": round(r["fc"]["p50"][83], 1) if r["fc"] else None}
+                f"Trend per {U_LONG[:-1]}": round(UNIT_DAYS * r["fc"]["slope"], 2) if r["fc"] else None,
+                f"Projected in {84 // UNIT_DAYS} {U}": round(r["fc"]["p50"][83], 1) if r["fc"] else None}
                 for r in results]), hide_index=True)
     with tab2:
+        new_tab()
         keys = [(r["rack"], r["resource"]) for r in results]
         rack, res = st.selectbox("Series", keys, format_func=lambda k: f"{k[0]} · {k[1]}")
         r = next(x for x in results if (x["rack"], x["resource"]) == (rack, res))

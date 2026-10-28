@@ -21,7 +21,6 @@ from pipeline.forecast import forecast
 PARAMS = ["ROLL_DAYS", "MIN_FIT_DAYS", "FALLBACK_FIT_DAYS", "MAX_FIT_DAYS", "HORIZON_DAYS",
           "CP_MIN_SIZE", "CP_JUMP", "CP_PENALTY", "Z_80", "SUSTAIN_RUNS",
           "BACKTEST_STEP_DAYS", "BACKTEST_START_DAY"]
-BACKTEST_LOG = config.AUDIT_DIR / "backtest_log.jsonl"
 
 
 def _key(rack_series, limits):
@@ -57,7 +56,7 @@ def scan(rack_series, limits):
     df["status"] = _statuses(df)
     config.CACHE_DIR.mkdir(exist_ok=True)
     df.to_pickle(cache)
-    audit.append(records, BACKTEST_LOG)
+    audit.append(records, config.AUDIT_DIR / "backtest_log.jsonl")
     return df
 
 

@@ -49,6 +49,8 @@ def forecast(raw: pd.Series, cutoff=None, fit_start=None, cps=None):
     """
     cutoff = raw.index[-1] if cutoff is None else pd.Timestamp(cutoff)
     raw = raw.loc[:cutoff]
+    if raw.empty:          # cutoff is before this series starts (e.g. a sensor added late)
+        return None
     sm = smooth(raw)
     if cps is None:
         start = search_start(raw, cutoff)

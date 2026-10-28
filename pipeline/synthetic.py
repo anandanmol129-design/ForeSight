@@ -5,6 +5,7 @@ Scenario (day numbers from the start of the data):
       rack-1 storage_tb   tenant-B grows from day 40      -> crosses ~day 165
       rack-3 power_kw     GPU build-out ramps from day 130 -> crosses ~day 240
       rack-2 vm_count     tenant-D grows from day 200      -> crosses ~day 300
+  * a 4th event on software licence seats: rack-3 tenant-A CI agents grow from day 60
   * regime change: tenant-E onboards rack-4 on day 290 (step + steeper slope)
   * still-growing series at the end so the demo shows CRITICAL / WARNING / PLAN
   * 5 short spikes that resolve within 1-3 days (logged as transient_spike)
@@ -23,7 +24,7 @@ TENANTS = ["tenant-A", "tenant-B", "tenant-C", "tenant-D", "tenant-E"]
 
 LIMITS = {  # resource: (capacity, safety_margin) - same for every rack
     "power_kw": (40.0, 4.0), "temp_c": (35.0, 3.0), "storage_tb": (500.0, 50.0),
-    "network_gbps": (100.0, 10.0), "vm_count": (400.0, 40.0),
+    "network_gbps": (100.0, 10.0), "vm_count": (400.0, 40.0), "licences": (250.0, 25.0),
 }
 # Baseline per (rack, tenant): (storage_tb, network_gbps, vm_count)
 BASE = {
@@ -35,6 +36,13 @@ BASE = {
     ("rack-3", "tenant-D"): (110, 20, 75),
     ("rack-4", "tenant-A"): (100, 15, 60), ("rack-4", "tenant-B"): (120, 20, 70),
     ("rack-4", "tenant-D"): (110, 18, 70), ("rack-4", "tenant-E"): (0, 0, 0),
+}
+# Licence seats in use per (rack, tenant), pooled per rack (e.g. per-host software licences)
+LICENCES = {
+    ("rack-1", "tenant-A"): 50, ("rack-1", "tenant-B"): 60, ("rack-1", "tenant-C"): 45,
+    ("rack-2", "tenant-B"): 55, ("rack-2", "tenant-C"): 50, ("rack-2", "tenant-D"): 60,
+    ("rack-3", "tenant-A"): 60, ("rack-3", "tenant-C"): 50, ("rack-3", "tenant-D"): 55,
+    ("rack-4", "tenant-A"): 45, ("rack-4", "tenant-B"): 55, ("rack-4", "tenant-D"): 50,
 }
 SPIKES = [  # (rack, resource, tenant or None, start_day, n_days, added amount)
     ("rack-2", "temp_c", None, 100, 2, 9.0),
@@ -102,6 +110,13 @@ def daily_levels():
                    "Power alarm on rack-3: GPU build-out exceeded circuit budget; nodes moved"))
     for rack in RACKS:
         lv[(rack, "temp_c", None)] = 21 + 0.15 * lv[(rack, "power_kw", None)]
+
+    # Licence seats (added last so the other series keep their noise draws)
+    for (rack, tenant), seats in LICENCES.items():
+        lv[(rack, "licences", tenant)] = np.full(N_DAYS, float(seats))
+    exhaust(("rack-3", "licences", "tenant-A"), 0.4, 60, 70, 120,
+            "Licence pool exhausted on rack-3: tenant-A CI build agents; idle seats reclaimed")
+    lv[("rack-4", "licences", "tenant-E")] = on * 20 + ramp(d, 290, 0.3)   # onboarding -> PLAN
     return lv, events
 
 
@@ -119,8 +134,10 @@ def generate(seed=7):
             x *= np.where(weekend, 0.94, 1.02)                         # weekly seasonality
         if res in ("power_kw", "network_gbps", "temp_c"):
             x *= 1 + 0.04 * np.sin((hod - 9) / 24 * 2 * np.pi)       # daily cycle
-        noise = {"temp_c": 0.015, "storage_tb": 0.004}.get(res, 0.03)
+        noise = {"temp_c": 0.015, "storage_tb": 0.004, "licences": 0.01}.get(res, 0.03)
         x *= 1 + rng.normal(0, noise, len(x))
+        if res == "licences":
+            x = np.round(x)                                           # whole seats
         for s_rack, s_res, s_ten, s_day, s_len, amt in SPIKES:
             if (s_rack, s_res, s_ten) == (rack, res, tenant):
                 x += np.where((day_idx >= s_day) & (day_idx < s_day + s_len), amt, 0)

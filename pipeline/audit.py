@@ -5,7 +5,10 @@ from datetime import datetime, timezone
 
 import config
 
-LOG = config.AUDIT_DIR / "forecast_log.jsonl"
+
+def log_path():
+    """Resolved per call: the app can switch data-centre records while running."""
+    return config.AUDIT_DIR / "forecast_log.jsonl"
 
 
 def _d(x):
@@ -37,7 +40,7 @@ def record(run_id, viewer, rack, resource, fc, eta=None, status=None, driver=Non
 
 def append(records, path=None):
     """Append only - existing lines are never rewritten."""
-    path = path or LOG
+    path = path or log_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a") as f:
         for r in records:
@@ -45,7 +48,7 @@ def append(records, path=None):
 
 
 def tail(n=200, path=None):
-    path = path or LOG
+    path = path or log_path()
     if not path.exists():
         return []
     with open(path) as f:

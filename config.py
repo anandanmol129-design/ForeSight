@@ -1,11 +1,49 @@
 """All tunables and column mappings live here. Edit this file when real data arrives."""
+import json
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).parent
-DATA_DIR = ROOT / "data"                  # real data goes here; if empty we use synthetic data
 SYNTH_DIR = ROOT / "synthetic_data"       # generated data (never written into DATA_DIR)
-AUDIT_DIR = ROOT / "audit"
 CACHE_DIR = ROOT / ".cache"
+RECORDS_DIR = ROOT / "raw_data"           # data-centre records: raw_data/dc_*/ (see README there)
+
+
+def use_record(path=None):
+    """Point loading and auditing at one data-centre record (None = ./data, else synthetic).
+    A record may hold record.json: {"name": ..., "step": "day" | "hour", "epoch": ...};
+    step "hour" means each model day is one real hour, counted from epoch."""
+    global DATA_DIR, AUDIT_DIR, RECORD
+    DATA_DIR = ROOT / (path or "data")    # real data goes here; if empty we use synthetic data
+    AUDIT_DIR = ROOT / "audit" / (Path(path).name if path else "")   # one audit log per record
+    meta = DATA_DIR / "record.json"
+    RECORD = {"name": Path(path).name if path else "default", "step": "day",
+              "epoch": "2000-01-01", **(json.loads(meta.read_text()) if meta.exists() else {})}
+
+
+def records():
+    """{display name: path} of every record: the default (./data, else synthetic) first, then
+    each raw_data/dc_*, then the active record if it lives anywhere else."""
+    data = ROOT / "data"
+    out = {"Local ./data" if data.exists() and any(data.iterdir()) else "Synthetic demo": None}
+    seen = {data.resolve()}
+    for d in (*sorted(RECORDS_DIR.glob("dc_*")), DATA_DIR):
+        d = d.resolve()
+        if d in seen or (d != DATA_DIR.resolve() and not any(d.glob("*telemetry*"))):
+            continue                      # the active record is always listed
+        seen.add(d)
+        meta = d / "record.json"
+        out[json.loads(meta.read_text()).get("name", d.name) if meta.exists() else d.name] = str(d)
+    return out
+
+
+def is_active(path):
+    return (ROOT / (path or "data")).resolve() == DATA_DIR.resolve()
+
+
+# AO02_DATA_DIR picks the starting record, e.g. AO02_DATA_DIR=raw_data/dc_m100
+DEFAULT_RECORD = os.environ.get("AO02_DATA_DIR")
+use_record(DEFAULT_RECORD)
 
 # ---------------------------------------------------------------------------
 # REAL DATA MAPPING  (edit these when the real files arrive; see README)
@@ -49,13 +87,14 @@ RESOURCE_ALIASES = {}
 # ---------------------------------------------------------------------------
 # RESOURCES
 # ---------------------------------------------------------------------------
-RESOURCES = ["power_kw", "temp_c", "storage_tb", "network_gbps", "vm_count"]
+RESOURCES = ["power_kw", "temp_c", "storage_tb", "network_gbps", "vm_count", "licences"]
 # Rack-level metrics: tenant is forced to None and duplicates per (timestamp, rack) are
 # averaged, so a per-tenant file never multiplies rack power by the number of tenants.
 RACK_LEVEL_RESOURCES = {"power_kw", "temp_c"}
 DAILY_AGG = {"temp_c": "max"}            # everything else: mean
 UNITS = {"power_kw": "kW", "temp_c": "°C", "storage_tb": "TB",
-         "network_gbps": "Gbps", "vm_count": "VMs"}
+         "network_gbps": "Gbps", "vm_count": "VMs", "licences": "seats",
+         "cpu_pct": "%", "mem_pct": "%", "disk_io_pct": "%"}
 
 # ---------------------------------------------------------------------------
 # MODEL PARAMETERS

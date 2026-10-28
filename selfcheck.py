@@ -67,7 +67,8 @@ check(s["spikes_that_alerted"] == 0, "no short spike raised an alert", target=Tr
 check(np.isfinite(s["mape_last30_pct"]), f"MAPE finite ({s['mape_last30_pct']}%)")
 
 print("\n== Audit ==")
-check(audit.LOG.exists() and len(audit.tail(5)) > 0, f"audit log written to {audit.LOG}")
+check(audit.log_path().exists() and len(audit.tail(5)) > 0,
+      f"audit log written to {audit.log_path()}")
 
 print("\n== Streamlit app (AppTest) ==")
 try:
@@ -75,7 +76,7 @@ try:
     at = AppTest.from_file("app.py", default_timeout=600).run()
     check(not at.exception, f"operator view renders without exceptions {list(at.exception)}")
     tenant = sorted(tel["tenant"].dropna().unique())[0]
-    at.sidebar.selectbox[0].select(tenant).run()
+    next(sb for sb in at.sidebar.selectbox if sb.label == "View as").select(tenant).run()
     check(not at.exception, f"tenant view renders without exceptions {list(at.exception)}")
     text = " ".join(m.value for m in at.markdown) + " ".join(str(d.value) for d in at.dataframe)
     others = [t for t in tel["tenant"].dropna().unique() if t != tenant]
