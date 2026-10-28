@@ -1,0 +1,61 @@
+/* Console polish layered on the config.toml theme. Targets only st-key-* classes from keyed
+   containers plus a few stable data-testids. */
+
+/* ---- hero header */
+.st-key-hero {
+  background:
+    radial-gradient(120% 140% at 100% 0%, rgba(20, 184, 166, 0.16) 0%, rgba(20, 184, 166, 0) 55%),
+    radial-gradient(90% 120% at 0% 100%, rgba(14, 165, 233, 0.10) 0%, rgba(14, 165, 233, 0) 60%),
+    linear-gradient(180deg, #111a2e 0%, #0d1526 100%);
+  border: 1px solid #1e2a44;
+  border-radius: 16px;
+  padding: 1.5rem 1.75rem 1.25rem;
+}
+.st-key-hero h1, .st-key-hero h2 { letter-spacing: -0.02em; padding: 0; }
+.st-key-hero [data-testid="stCaptionContainer"] p { color: #94a3b8; }
+.eyebrow {
+  font-size: 0.72rem; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase;
+  color: #5eead4; margin: 0;
+}
+
+/* ---- KPI cards: severity accent along the top edge */
+[class*="st-key-kpi_"] {
+  background: linear-gradient(180deg, #111a2e 0%, #0e1729 100%);
+  border-top-width: 3px !important;
+}
+[class*="st-key-kpi_critical_"] { border-top-color: #f43f5e !important; }
+[class*="st-key-kpi_warning_"]  { border-top-color: #f59e0b !important; }
+[class*="st-key-kpi_plan_"]     { border-top-color: #3b82f6 !important; }
+[class*="st-key-kpi_hold_"]     { border-top-color: #64748b !important; }
+[class*="st-key-kpi_neutral_"]  { border-top-color: #14b8a6 !important; }
+
+[data-testid="stMetricLabel"] p {
+  text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.72rem; font-weight: 600;
+  color: #94a3b8;
+}
+[data-testid="stMetricValue"] {
+  font-family: 'JetBrains Mono', ui-monospace, monospace; letter-spacing: -0.02em;
+}
+
+/* ---- dashboard panels */
+[class*="st-key-panel_"] {
+  background: linear-gradient(180deg, #111a2e 0%, #0d1526 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 12px 32px -18px rgba(0, 0, 0, 0.8);
+}
+.panel-title { font-size: 0.95rem; font-weight: 600; color: #f1f5f9; margin: 0; }
+.panel-sub { font-size: 0.78rem; color: #94a3b8; margin: 0.1rem 0 0; }
+
+/* ---- tabs read as top-level navigation */
+[data-testid="stTabs"] [data-baseweb="tab-list"] { gap: 0.5rem; border-bottom: 1px solid #1e2a44; }
+[data-testid="stTabs"] [data-baseweb="tab"] { padding: 0.6rem 0.4rem; }
+[data-testid="stTabs"] [data-baseweb="tab"] p { font-weight: 600; font-size: 0.9rem; }
+
+/* ---- sidebar */
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p { color: #94a3b8; }
+.side-label {
+  font-size: 0.68rem; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase;
+  color: #64748b; margin: 0.25rem 0 0;
+}
+
+/* transparent app header so the gradient hero sits flush */
+[data-testid="stHeader"] { background: transparent; }
