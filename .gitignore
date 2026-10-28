@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+audit/
+*.pyc
+.cache/
+synthetic_data/
