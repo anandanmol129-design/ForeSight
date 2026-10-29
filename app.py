@@ -923,7 +923,8 @@ if viewer == "Operator":
                 hovertext=[f"{r['rack']} · {r['resource']}: {r['status']}" for r in hr]))
             plot(styled(fig, height=280, legend=False)
                  .update_yaxes(title="headroom %").update_xaxes(tickangle=-45))
-        for col, r in zip((g1, g2), (alerts_ + rows)[:2]):
+        gauges = list({id(r): r for r in alerts_ + rows}.values())[:2]   # never the same rack twice
+        for col, r in zip((g1, g2), gauges):
             with col, panel(f"{r['rack']} · {r['resource']}", ":material/speed:"):
                 plot(gauge(r))
 
